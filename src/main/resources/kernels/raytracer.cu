@@ -338,13 +338,18 @@ __device__ inline void leaf_plain(const Scene* sc, int code, float3 origin, floa
  * both; leaves are opened on the spot, and of two inner children the nearer is taken first while
  * the other waits on the stack. LEAF_FN is the leaf test - plain geometry, or geometry and fog.
  *
- * The slab test multiplies by a precomputed 1/direction. A ray parallel to a slab plane gives
- * 0 * inf = NaN when it starts exactly on the plane; fmin/fmax return their other operand for a
- * NaN, so such an axis simply stops constraining the interval instead of poisoning it.
+ * The slab test multiplies by a precomputed 1/direction, as one fused multiply-add per plane:
+ * (plane - origin) * inv = fmaf(plane, inv, -origin * inv), with origin * inv worked out once per
+ * traversal. NVIDIA's OpenCL compiler made that rewrite on its own under unsafe math; NVRTC does
+ * not, and the two extra operations on each of the 12 planes of every node made tracing slower.
+ * A ray parallel to a slab plane (inv infinite) gives inf - inf = NaN there; fminf/fmaxf return
+ * their other operand for a NaN, so that axis simply stops constraining the interval instead of
+ * poisoning it - a box may then be entered needlessly, never missed.
  */
 #define BVH_TRAVERSE(LEAF_FN)                                                                  \
     {                                                                                          \
         float3 inv = 1.0f / direction;                                                         \
+        float3 oi = origin * inv;                                                              \
         int stack[STACK_SIZE];                                                                 \
         int sp = 0;                                                                            \
         int node = root;                                                                       \
@@ -354,12 +359,12 @@ __device__ inline void leaf_plain(const Scene* sc, int code, float3 origin, floa
             float4 n1 = n[1];                                                                  \
             float4 n2 = n[2];                                                                  \
             float4 n3 = n[3]; int2 codes = make_int2(__float_as_int(n3.x), __float_as_int(n3.y));                                                     \
-            float aLoX = (n0.x - origin.x) * inv.x, aHiX = (n0.y - origin.x) * inv.x;          \
-            float aLoY = (n0.z - origin.y) * inv.y, aHiY = (n0.w - origin.y) * inv.y;          \
-            float aLoZ = (n2.x - origin.z) * inv.z, aHiZ = (n2.y - origin.z) * inv.z;          \
-            float bLoX = (n1.x - origin.x) * inv.x, bHiX = (n1.y - origin.x) * inv.x;          \
-            float bLoY = (n1.z - origin.y) * inv.y, bHiY = (n1.w - origin.y) * inv.y;          \
-            float bLoZ = (n2.z - origin.z) * inv.z, bHiZ = (n2.w - origin.z) * inv.z;          \
+            float aLoX = fmaf(n0.x, inv.x, -oi.x), aHiX = fmaf(n0.y, inv.x, -oi.x);            \
+            float aLoY = fmaf(n0.z, inv.y, -oi.y), aHiY = fmaf(n0.w, inv.y, -oi.y);            \
+            float aLoZ = fmaf(n2.x, inv.z, -oi.z), aHiZ = fmaf(n2.y, inv.z, -oi.z);            \
+            float bLoX = fmaf(n1.x, inv.x, -oi.x), bHiX = fmaf(n1.y, inv.x, -oi.x);            \
+            float bLoY = fmaf(n1.z, inv.y, -oi.y), bHiY = fmaf(n1.w, inv.y, -oi.y);            \
+            float bLoZ = fmaf(n2.z, inv.z, -oi.z), bHiZ = fmaf(n2.w, inv.z, -oi.z);            \
             float aNear = fmaxf(fmaxf(fminf(aLoX, aHiX), fminf(aLoY, aHiY)), fmaxf(fminf(aLoZ, aHiZ), tMin)); \
             float aFar = fminf(fminf(fmaxf(aLoX, aHiX), fmaxf(aLoY, aHiY)), fminf(fmaxf(aLoZ, aHiZ), best->t)); \
             float bNear = fmaxf(fmaxf(fminf(bLoX, bHiX), fminf(bLoY, bHiY)), fmaxf(fminf(bLoZ, bHiZ), tMin)); \
