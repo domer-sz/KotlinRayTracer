@@ -673,7 +673,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                     } else {
                         current?.close()
                         session = null
-                        GpuSession(buffers, pixels).also {
+                        GpuSession.open(buffers, pixels).also {
                             session = it
                             capacity = pixels
                         }

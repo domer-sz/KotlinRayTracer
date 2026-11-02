@@ -17,6 +17,7 @@ import org.lwjgl.opencl.CL10.clGetDeviceIDs
 import org.lwjgl.opencl.CL10.clGetDeviceInfo
 import org.lwjgl.opencl.CL10.clGetPlatformIDs
 import org.lwjgl.opencl.CL10.clGetProgramBuildInfo
+import org.lwjgl.opencl.CL10.clGetProgramInfo
 import org.lwjgl.opencl.CL10.clReleaseCommandQueue
 import org.lwjgl.opencl.CL10.clReleaseContext
 import org.lwjgl.system.Configuration
@@ -48,6 +49,19 @@ class OpenClContext private constructor(
             // -Drt.cl.log shows what the compiler said even on success - with NVIDIA's
             // -cl-nv-verbose that is the register and spill count, the kernel's key limits.
             if (System.getProperty("rt.cl.log") != null) System.err.println("[gpu] build log:\n${buildLog(program)}")
+            // -Drt.cl.dump=<file> keeps the program binary - PTX text on NVIDIA.
+            System.getProperty("rt.cl.dump")?.let { path ->
+                val sizes = stack.mallocPointer(1)
+                clGetProgramInfo(program, org.lwjgl.opencl.CL10.CL_PROGRAM_BINARY_SIZES, sizes, null)
+                val binary = MemoryUtil.memAlloc(sizes.get(0).toInt())
+                try {
+                    val pointers = stack.mallocPointer(1).put(0, MemoryUtil.memAddress(binary))
+                    clGetProgramInfo(program, org.lwjgl.opencl.CL10.CL_PROGRAM_BINARIES, pointers, null)
+                    java.nio.file.Files.write(java.nio.file.Paths.get(path), ByteArray(binary.remaining()).also { binary.get(it) })
+                } finally {
+                    MemoryUtil.memFree(binary)
+                }
+            }
             return program
         }
     }

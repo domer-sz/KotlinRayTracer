@@ -58,7 +58,7 @@ object TurntableRender {
                     setup, settings, denoiser, output,
                     sessionFor = { frame ->
                         val buffers = buffersAt(frame)
-                        session?.also { it.replaceScene(buffers) } ?: GpuSession(buffers, setup.totalPixels).also { session = it }
+                        session?.also { it.replaceScene(buffers) } ?: GpuSession.open(buffers, setup.totalPixels).also { session = it }
                     },
                     progress = { done, total, elapsed ->
                         val perFrame = elapsed / 1e9 / done

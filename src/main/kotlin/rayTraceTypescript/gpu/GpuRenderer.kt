@@ -22,7 +22,7 @@ class GpuRenderer : Renderer {
         System.err.println("[gpu] flatten $flattenMs ms (${scene.nodeCount} nodes, depth ${scene.maxDepth})")
         val denoiser = requestedDenoiser()
 
-        GpuSession(scene, setup.totalPixels).use { session ->
+        GpuSession.open(scene, setup.totalPixels).use { session ->
             session.setCamera(setup)
             // -Drt.aov=albedo|normal renders a denoiser guide instead of the image.
             val mainMode = when (System.getProperty("rt.aov")) {
@@ -82,13 +82,15 @@ class GpuRenderer : Renderer {
         private val MODE_NAMES = listOf("image", "albedo guide", "normal guide")
         /** Samples for the denoiser guides; they only see the first hit, so few are enough. */
         private const val GUIDE_SAMPLES = 256
-        private const val KERNEL_RESOURCE = "/kernels/raytracer.cl"
+        fun unavailabilityReason(): String? = GpuSession.unavailabilityReason()
 
-        fun unavailabilityReason(): String? = OpenClContext.unavailabilityReason()
+        fun openClKernelSource(): String = resource("/kernels/raytracer.cl")
 
-        fun kernelSource(): String = GpuRenderer::class.java.getResourceAsStream(KERNEL_RESOURCE)
+        fun cudaKernelSource(): String = resource("/kernels/raytracer.cu")
+
+        private fun resource(path: String): String = GpuRenderer::class.java.getResourceAsStream(path)
             ?.bufferedReader()?.use { it.readText() }
-            ?: throw OpenClException("kernel resource $KERNEL_RESOURCE is missing from the jar")
+            ?: throw IllegalStateException("kernel resource $path is missing from the jar")
 
         /**
          * The denoiser, when -Drt.denoise asks for one (any value but "off") and its DLLs are

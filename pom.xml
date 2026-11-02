@@ -38,6 +38,12 @@
       <groupId>org.lwjgl</groupId>
       <artifactId>lwjgl-opencl</artifactId>
     </dependency>
+    <!-- CUDA driver API and NVRTC; no natives: nvcuda.dll comes with the NVIDIA driver and
+         NVRTC from native/cuda (gpu/CudaContext). -->
+    <dependency>
+      <groupId>org.lwjgl</groupId>
+      <artifactId>lwjgl-cuda</artifactId>
+    </dependency>
     <!-- A hidden OpenGL window keeps the NVIDIA driver on Windows at full clocks during a
          render (gpu/GpuKeepAwake); it only runs on Windows, so only Windows natives. -->
     <dependency>
