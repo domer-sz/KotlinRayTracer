@@ -44,6 +44,7 @@ object HelpDialog {
             "T" to "Szybki podgląd (domyślny, do ustawiania sceny) / ray tracing",
             "D" to "Odszumianie włącz / wyłącz (ray tracing)",
             "S" to "Zapisz obraz pod wybraną nazwą (PPM i PNG, z odszumioną kopią)",
+            "Panel: Film obrotowy…" to "Film MP4 (ffmpeg): zaznaczony obiekt, a bez zaznaczenia wszystkie, obraca się w miejscu przy stałej kamerze i świetle; format, czas obrotu, obroty, kl./s, próbki; Przerwij nic nie zapisuje",
             "Panel: rozdzielczość, Cel spp" to "Rozmiar obrazu i liczba próbek, przy której render się kończy",
             "Panel: Odbicia (maks.)" to "Ile razy promień może się odbić lub załamać (ray tracing); mniej - szybciej, ciemniej w szkle i zakamarkach"
         ),

@@ -181,6 +181,10 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         full(progress)
         full(denoise)
         full(save)
+        full(JButton("Film obrotowy…").apply {
+            toolTipText = "Film MP4: obiekty obracają się w miejscu, kamera i światła stoją"
+            addActionListener { TurntableDialog.show(viewer, frame) }
+        })
         full(JButton("Pomoc - skróty (F1)").apply { addActionListener { HelpDialog.show(frame) } })
 
         if (lightSwitches.isNotEmpty()) {

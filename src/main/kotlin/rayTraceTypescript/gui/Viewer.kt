@@ -220,6 +220,19 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             }
             // -Drt.gui.load=scene.rtscene opens a saved scene (Main has already picked its base scene).
             System.getProperty("rt.gui.load")?.let { controls.loadScene(File(it)) }
+            // -Drt.gui.film=film.mp4 starts a turntable film at once, at the panel's size and the
+            // -Drt.turntable.* settings - the dialog's path without the clicks, for scripts.
+            System.getProperty("rt.gui.film")?.let { path ->
+                val size = resolution
+                val settings = rayTraceTypescript.gpu.TurntableSettings.fromProperties(64)
+                startFilm(FilmJob(settings, Resolution(size.width - size.width % 2, size.height - size.height % 2), File(path), object : FilmListener {
+                    override fun progress(done: Int, total: Int, elapsedNanos: Long) =
+                        System.err.println("[viewer] film frame $done of $total, %.2f s a frame".format(elapsedNanos / 1e9 / done))
+
+                    override fun finished(saved: Boolean, error: String?) =
+                        System.err.println("[viewer] film ${if (saved) "saved: $path" else "not saved" + (error?.let { ": $it" } ?: "")}")
+                }))
+            }
         }
         val renderThread = Thread({ renderLoop() }, "viewer-render").apply { start() }
         closed.await()
@@ -347,6 +360,97 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     fun sceneChanged() {
         lastSceneEdit = System.currentTimeMillis()
         sceneVersion.incrementAndGet()
+    }
+
+    // ------------------------------------------------------------------ turntable film
+
+    /** What a film dialog hears back: progress while it renders, then how it ended. */
+    interface FilmListener {
+        fun progress(done: Int, total: Int, elapsedNanos: Long)
+        /** [saved] is false when it was cancelled or failed; [error] says why it failed. */
+        fun finished(saved: Boolean, error: String?)
+    }
+
+    /** One film to render: picked up by the render thread, which pauses the view meanwhile. */
+    class FilmJob(
+        val settings: rayTraceTypescript.gpu.TurntableSettings,
+        val size: Resolution,
+        val output: File,
+        val listener: FilmListener
+    ) {
+        @Volatile var cancelled = false
+    }
+
+    @Volatile private var filmJob: FilmJob? = null
+
+    /**
+     * What a film turns: the selected object, or else every added object, or else the scene's own
+     * objects (never its lights or walls) - together, about the middle of their footprints.
+     */
+    fun filmTurning(): List<Movable> = selectedMovable?.let { listOf(it) }
+        ?: objects.toList().ifEmpty { builtIns.filter { !it.part.isLight && it.enabled } }
+
+    /** Whether frames would be denoised: the D switch, and the OIDN library being there. */
+    fun filmDenoised(): Boolean = denoiseOn && rayTraceTypescript.render.Denoiser.folder() != null
+
+    /** Hands [job] to the render thread; it reports through its listener. */
+    fun startFilm(job: FilmJob) {
+        filmJob = job
+    }
+
+    /** Where films go unless the user picks another folder: beside saved images. */
+    val filmFolder: File get() = lastSaveFolder
+    val sceneName: String get() = scene.name
+
+    /**
+     * Renders [job] on the render thread: each frame turns [filmTurning]'s objects to that frame's
+     * angle and rebuilds the GPU scene through [open]; afterwards they stand as before. Returns the
+     * session it last used, which may be a new one when the film is larger than the view.
+     */
+    private fun runFilm(job: FilmJob, denoiser: Denoiser?, pixels: Int, open: (Int) -> GpuSession): GpuSession? {
+        val turning = filmTurning()
+        val originals = turning.map { doubleArrayOf(it.x, it.z, it.rotation) }
+        val axisX = originals.map { it[0] }.average()
+        val axisZ = originals.map { it[1] }.average()
+        val filmSetup = setup(view, job.size)
+        var last: GpuSession? = null
+        status = "Renderuję film obrotowy…"
+        try {
+            val saved = rayTraceTypescript.gpu.TurntableFilm.render(
+                filmSetup, job.settings, if (denoiseOn) denoiser else null, job.output.toPath(),
+                sessionFor = { frame ->
+                    val radians = Math.toRadians(job.settings.degrees(frame).toDouble())
+                    val c = cos(radians)
+                    val s = sin(radians)
+                    turning.forEachIndexed { i, o ->
+                        // Its place turned about the axis, as Placement turns points, and itself as much.
+                        val dx = originals[i][0] - axisX
+                        val dz = originals[i][1] - axisZ
+                        o.x = c * dx + s * dz + axisX
+                        o.z = -s * dx + c * dz + axisZ
+                        o.rotation = originals[i][2] + job.settings.degrees(frame)
+                    }
+                    open(pixels).also { last = it }
+                },
+                cancelled = { job.cancelled || !running },
+                progress = { done, total, elapsed -> job.listener.progress(done, total, elapsed) }
+            )
+            status = if (saved) "Zapisano film ${job.output.name}" else "Film przerwany - nic nie zapisano"
+            job.listener.finished(saved, null)
+        } catch (t: Throwable) {
+            t.printStackTrace()
+            val message = generateSequence(t) { it.cause }.last().message ?: t.toString()
+            status = "Film nie powstał: $message"
+            job.listener.finished(false, message)
+        } finally {
+            turning.forEachIndexed { i, o ->
+                o.x = originals[i][0]
+                o.z = originals[i][1]
+                o.rotation = originals[i][2]
+            }
+            sceneChanged()
+        }
+        return last
     }
 
     /** Where the next save goes, without an extension; chosen in [chooseSave]. */
@@ -629,6 +733,18 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         var lastShownState: List<Any?>? = null
 
         while (running) {
+            // A film takes the GPU over until it is done; the view then starts afresh.
+            val job = filmJob
+            if (job != null) {
+                filmJob = null
+                val filmPixels = maxOf(sessionPixels, job.size.pixels)
+                runFilm(job, denoiser, filmPixels, open)?.let {
+                    session = it
+                    sessionPixels = filmPixels
+                }
+                accumulated = null
+                continue
+            }
             val size = resolution
             val version = sceneVersion.get()
             // Rebuild the GPU copy when the objects changed (once edits pause) or the image outgrew it.
