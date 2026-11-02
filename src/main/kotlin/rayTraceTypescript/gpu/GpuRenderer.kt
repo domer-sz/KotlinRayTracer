@@ -9,7 +9,7 @@ import rayTraceTypescript.render.Renderer
 import java.nio.file.Path
 
 /**
- * Runs the whole path tracer on an OpenCL device: one work item per pixel, all samples,
+ * Runs the whole path tracer on a CUDA device: one thread per pixel, all samples,
  * bounces, BVH traversal and shading happen in the kernel (see [GpuSession]). The CPU only
  * flattens the scene, hands over the camera basis and writes the files.
  */
@@ -84,7 +84,6 @@ class GpuRenderer : Renderer {
         private const val GUIDE_SAMPLES = 256
         fun unavailabilityReason(): String? = GpuSession.unavailabilityReason()
 
-        fun openClKernelSource(): String = resource("/kernels/raytracer.cl")
 
         fun cudaKernelSource(): String = resource("/kernels/raytracer.cu")
 

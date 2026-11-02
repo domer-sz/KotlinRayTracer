@@ -4,7 +4,6 @@ import kotlin.math.*
 import rayTraceTypescript.utils.degreesToRadians
 import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.render.CameraSetup
-import rayTraceTypescript.render.RendererFactory
 import java.nio.file.Path
 import java.nio.file.Paths
 
@@ -33,10 +32,13 @@ class Camera {
 
     /**
      * Renders [world] into [outputPath] and returns the number of primary rays traced.
-     * The backend (GPU or CPU) is picked by [RendererFactory]; both share this camera geometry.
+     * It renders on the GPU through CUDA ([rayTraceTypescript.gpu.GpuRenderer]); without a CUDA
+     * device it fails with the reason rather than falling back to anything slower.
      */
-    fun render(world: Hittable, outputPath: Path = Paths.get("image.ppm")): Long =
-        RendererFactory.create().render(world, initialize(), outputPath)
+    fun render(world: Hittable, outputPath: Path = Paths.get("image.ppm")): Long {
+        rayTraceTypescript.gpu.GpuRenderer.unavailabilityReason()?.let { throw IllegalStateException("GPU rendering unavailable: $it") }
+        return rayTraceTypescript.gpu.GpuRenderer().render(world, initialize(), outputPath)
+    }
 
     fun initialize(): CameraSetup {
         var imageHeight = floor(imageWidth.toFloat() / aspectRatio).toInt()

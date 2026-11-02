@@ -16,7 +16,7 @@ import org.lwjgl.opengl.GL11.glFinish
 /**
  * Keeps the NVIDIA driver on Windows from clocking the card down in the middle of a render.
  *
- * The driver judges idleness by the graphics engine, not by OpenCL's compute work: a few
+ * The driver judges idleness by the graphics engine, not by compute work: a few
  * seconds into a render it drops a GTX 1070 from P2 (1582-1936 MHz core, 3802 MHz memory) to
  * P5 (~700 / 810 MHz) with the reason "Idle" while the card is 100% busy, halving throughput.
  * Launch length (16 ms to 1 s) and queue depth make no difference, and GeForce cards refuse

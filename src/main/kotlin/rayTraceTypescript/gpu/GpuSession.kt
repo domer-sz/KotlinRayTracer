@@ -15,7 +15,7 @@ import kotlin.random.Random
  * the same kernels as long as the scene needs the same features. Launches block until the GPU
  * is done; a session belongs to one thread.
  *
- * [open] picks the backend: CUDA ([CudaSession]) unless -Drt.gpu=opencl asks for [OpenClSession].
+ * [open] makes one; the implementation is [CudaSession].
  */
 interface GpuSession : AutoCloseable {
     /**
@@ -89,24 +89,11 @@ interface GpuSession : AutoCloseable {
         const val SLICE_MS = 200.0
         internal const val CAMERA_FLOATS = 23
 
-        /** The backend -Drt.gpu names: "cuda" (the default) or "opencl". */
-        fun backend(): String = when (val wanted = System.getProperty("rt.gpu")?.lowercase()) {
-            null, "", "cuda" -> "cuda"
-            "opencl", "cl" -> "opencl"
-            else -> throw IllegalArgumentException("-Drt.gpu=$wanted: use cuda or opencl")
-        }
+        /** A session for [scene], with outputs for up to [maxPixels] pixels. */
+        fun open(scene: SceneBuffers, maxPixels: Int): GpuSession = CudaSession(scene, maxPixels)
 
-        /** A session of the chosen backend for [scene], with outputs for up to [maxPixels] pixels. */
-        fun open(scene: SceneBuffers, maxPixels: Int): GpuSession = when (backend()) {
-            "opencl" -> OpenClSession(scene, maxPixels)
-            else -> CudaSession(scene, maxPixels)
-        }
-
-        /** Null when the chosen backend can render here, otherwise a short reason. */
-        fun unavailabilityReason(): String? = when (backend()) {
-            "opencl" -> OpenClContext.unavailabilityReason()
-            else -> CudaContext.unavailabilityReason()
-        }
+        /** Null when a CUDA device and the kernel compiler are usable here, otherwise a short reason. */
+        fun unavailabilityReason(): String? = CudaContext.unavailabilityReason()
 
         internal fun initialSeed(): Long = RandomSource.seedValue() ?: Random.Default.nextLong()
 

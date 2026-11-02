@@ -129,7 +129,7 @@ internal class CudaSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSess
     /**
      * Left alone, NVIDIA's compiler gives the kernel ~100-128 registers, which fits only a
      * quarter of the threads a Pascal SM can hold. Capping registers costs some spilling but
-     * hides memory latency far better: measured with OpenCL on a GTX 1070, 64 is best across the
+     * hides memory latency far better: measured on a GTX 1070, 64 is best across the
      * scenes, except that volumes (a nested traversal) want 72.
      */
     private fun registerCap(extra: List<String>): List<String> =

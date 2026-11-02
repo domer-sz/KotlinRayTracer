@@ -1,15 +1,16 @@
 # Kotlin Ray Tracer
 
 Path tracer z książek *Ray Tracing in One Weekend* / *The Next Week* / *The Rest of Your Life*,
-napisany w Kotlinie, liczony na GPU przez OpenCL, z odszumianiem Intel Open Image Denoise
+napisany w Kotlinie, liczony na GPU przez CUDA, z odszumianiem Intel Open Image Denoise
 i interaktywnym oknem podglądu.
 
 ## Wymagania
 
 - **Windows x64** (biblioteki odszumiacza i okno trzymające zegary GPU są przygotowane pod Windows;
   sam render działa też na Linuksie).
-- **Karta graficzna z OpenCL** – testowane na NVIDIA GTX 1070. Bez GPU renderer sam przełącza się na CPU
-  (dużo wolniej, bez okna i bez odszumiania).
+- **Karta NVIDIA z CUDA** – testowane na GTX 1070 (Pascal, sm_61) ze sterownikiem 577. Kompilator
+  kernela (NVRTC) jest w `native/cuda`, więc CUDA Toolkit nie jest potrzebny. Bez karty NVIDIA renderer
+  nie działa (nie ma już trybu CPU ani OpenCL).
 - **JDK 17 lub nowszy** (testowane na Temurin 21) i **Maven**.
 
 Nic więcej nie trzeba instalować: odszumiacz OIDN jest w repozytorium (`native/oidn/windows-x64`).
@@ -148,7 +149,9 @@ materiały, światła – opisuje `AGENTS.md`.
 
 ## Rozwiązywanie problemów
 
-- **Czarne okno albo „GPU rendering unavailable”** – brak sterownika OpenCL; zaktualizuj sterownik karty.
+- **Czarne okno albo „GPU rendering unavailable”** – brak karty NVIDIA z CUDA albo sterownika; zaktualizuj
+  sterownik karty. „NVRTC not found” – uruchomiono spoza katalogu repozytorium; wskaż `native/cuda/windows-x64`
+  przez `-Drt.nvrtc=<ścieżka>`.
 - **„bez odszumiania (brak OIDN)” w pasku stanu** – brakuje `native/oidn/windows-x64`
   (np. uruchomiono spoza katalogu repozytorium); wskaż go przez `-Drt.oidn=<ścieżka>`.
 - **OutOfMemoryError przy dużym modelu** – zwiększ `MAVEN_OPTS` (`-Xmx12g` lub więcej).

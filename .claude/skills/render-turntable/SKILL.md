@@ -1,6 +1,6 @@
 ---
 name: render-turntable
-description: Render a ray traced turntable film (MP4) of a model with KoltinRayTracer's OpenCL renderer - the model turning in place while the camera, lamps and room stand still - e.g. Yennefer in StlViewer's gold studio (scene studio-model). Use when the user asks for a turntable / "film obrotowy" / "obrót" / "wyrenderuj obrót X" in this repo, with a length, number of turns, fps, samples or quality, or wants it compared with StlViewer's film of the same model.
+description: Render a ray traced turntable film (MP4) of a model with KoltinRayTracer's CUDA renderer - the model turning in place while the camera, lamps and room stand still - e.g. Yennefer in StlViewer's gold studio (scene studio-model). Use when the user asks for a turntable / "film obrotowy" / "obrót" / "wyrenderuj obrót X" in this repo, with a length, number of turns, fps, samples or quality, or wants it compared with StlViewer's film of the same model.
 ---
 
 # Rendering a turntable film
@@ -31,7 +31,7 @@ Run it in the background (`run_in_background`) - it prints a `\r` progress line,
 mvn -q -o compile
 mvn -q -o exec:java -Drt.scene=studio-model \
   -Drt.model="C:/Users/szymondomeracki/Documents/projects/StlViewer/models-to-render/models/003_yennefer/single_color_19.stl" \
-  -Drt.renderer=gpu -Drt.samples=64 \
+  -Drt.samples=64 \
   -Drt.turntable=renders/003-yennefer-gold-koltin-max.mp4 \
   -Drt.turntable.seconds=15 -Drt.turntable.fps=30 -Drt.turntable.turns=1 -Drt.turntable.quality=max \
   2>&1 | tr '\r' '\n' | grep --line-buffered -v '^\s*$' > renders/003-yennefer-gold-koltin-max.log
@@ -92,9 +92,12 @@ normals and clamps fireflies at 16, this renderer uses flat facet normals and no
 
 ## Measured (GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
 
-- Still: tracing 2.66 s, guides 0.56 s (256 spp), denoise 1.5 s on the CPU.
+- CUDA (the renderer now): still tracing 3.27 s; at 256 spp 11.7 s of GPU time. A film frame has
+  not been timed yet - expect roughly 4 s, so ~30 min for 450 frames; measure and write it here.
 - Film frame: tracing + 32-spp guides + scene rebuild (~0.25 s flatten, ~0.17 s upload) on the
-  render thread; denoise and encoding overlap the next frame.
-- 2026-11-02, the command above (Yennefer, studio-model, 15 s, 30 fps, 1 turn, max): 450 frames
-  at 3.48 s = 26 min; 17.06 MB, 9.10 Mbit/s, H.264 High, BT.709 tags.
+  render thread; denoise (1.5 s, OIDN on the CPU) and encoding overlap the next frame.
+- The OpenCL backend this replaced (branch `gpu-max-perf`), for comparison: still tracing 2.66 s;
+  2026-11-02, the command above (Yennefer, studio-model, 15 s, 30 fps, 1 turn, max): 450 frames
+  at 3.48 s = 26 min; 17.06 MB, 9.10 Mbit/s, H.264 High, BT.709 tags. That film and its frames are
+  the reference in `reference/turntable-opencl`.
 - StlViewer's own film of the same scene: 13.6 min for 450 frames, 18.0 MB (9.6 Mbit/s).

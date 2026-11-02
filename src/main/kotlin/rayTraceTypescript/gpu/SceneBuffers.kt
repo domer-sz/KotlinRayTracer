@@ -1,9 +1,9 @@
 package rayTraceTypescript.gpu
 
 /**
- * The scene, flattened into primitive arrays the OpenCL kernel can read.
+ * The scene, flattened into primitive arrays the CUDA kernel can read.
  *
- * Layout (see raytracer.cl, which mirrors these strides):
+ * Layout (see raytracer.cu, which mirrors these strides):
  *  - [nodes]: 16 ints per inner node, floats as raw bits - both children's boxes and codes,
  *    laid out as [BvhBuilder] describes
  *  - [leaves]: 2 ints per leaf - first entry in [refs], count
@@ -58,7 +58,7 @@ class SceneBuffers(
     val lightCount: Int get() = lights.size / 2
 
     /**
-     * The kernel's feature switches for this scene (see the top of raytracer.cl): a scene
+     * The kernel's feature switches for this scene (see the top of raytracer.cu): a scene
      * without volumes, textures or moving spheres gets a kernel without that code, which needs
      * fewer registers and so keeps more of the GPU busy.
      */

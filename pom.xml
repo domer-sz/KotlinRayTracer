@@ -34,10 +34,6 @@
       <groupId>org.lwjgl</groupId>
       <artifactId>lwjgl</artifactId>
     </dependency>
-    <dependency>
-      <groupId>org.lwjgl</groupId>
-      <artifactId>lwjgl-opencl</artifactId>
-    </dependency>
     <!-- CUDA driver API and NVRTC; no natives: nvcuda.dll comes with the NVIDIA driver and
          NVRTC from native/cuda (gpu/CudaContext). -->
     <dependency>
@@ -64,7 +60,7 @@
       <artifactId>lwjgl-opengl</artifactId>
       <classifier>natives-windows</classifier>
     </dependency>
-    <!-- LWJGL core natives; the OpenCL module binds to the platform ICD loader and ships none. -->
+    <!-- LWJGL core natives; the CUDA module binds to the driver (nvcuda) and NVRTC and ships none. -->
     <dependency>
       <groupId>org.lwjgl</groupId>
       <artifactId>lwjgl</artifactId>

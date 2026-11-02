@@ -5,18 +5,16 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
-import java.nio.file.Paths
 import java.util.zip.GZIPInputStream
-import java.util.zip.GZIPOutputStream
 import rayTraceTypescript.gpu.GpuRenderer
-import rayTraceTypescript.render.CpuRenderer
 import rayTraceTypescript.render.PpmWriter
 import rayTraceTypescript.render.Renderer
 import rayTraceTypescript.utils.RandomSource
 
 /**
  * The One Weekend finale, rendered by the GPU, must look like the golden image - a CPU render
- * with a pinned seed, stored in src/test/resources. The GPU draws other random numbers, so the
+ * with a pinned seed, stored in src/test/resources (the CPU path tracer that made it is gone,
+ * so it is frozen). The GPU draws other random numbers, so the
  * yardstick is the noise: a second CPU render with another seed, stored beside it.
  */
 class ImageRegressionTest {
@@ -42,17 +40,6 @@ class ImageRegressionTest {
             diff.highDiffCount <= maxOf(noise.highDiffCount * 2, MIN_HIGH_DIFF_CHANNELS),
             "${diff.highDiffCount} channels differ by >= $HIGH_DIFF_THRESHOLD (CPU-to-CPU noise produces ${noise.highDiffCount})"
         )
-    }
-
-    /**
-     * With UPDATE_REFERENCE_IMAGE=1 the CPU renders both references again (while the CPU path
-     * tracer exists). Do it only when a change is meant to alter the render.
-     */
-    @Test
-    fun `references can be rendered again on request`() {
-        assumeTrue(System.getenv("UPDATE_REFERENCE_IMAGE") == "1", "set UPDATE_REFERENCE_IMAGE=1 to rewrite the references")
-        store(GOLDEN, render(CpuRenderer(), SEED))
-        store(OTHER_SEED_REFERENCE, render(CpuRenderer(), OTHER_SEED))
     }
 
     private fun camera() = Camera().apply {
@@ -86,12 +73,6 @@ class ImageRegressionTest {
     private fun loadReference(name: String): ByteArray =
         GZIPInputStream(requireNotNull(javaClass.getResourceAsStream("/$name")) { "Missing reference image $name" })
             .use { it.readBytes() }
-
-    private fun store(name: String, image: PpmSupport.PpmImage) {
-        Files.newOutputStream(Paths.get("src/test/resources/$name")).use { out ->
-            GZIPOutputStream(out).use { it.write(PpmSupport.encode(image)) }
-        }
-    }
 
     companion object {
         private const val GOLDEN = "reference-image.ppm.gz"

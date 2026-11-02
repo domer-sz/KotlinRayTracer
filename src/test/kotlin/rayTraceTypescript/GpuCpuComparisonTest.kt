@@ -20,7 +20,6 @@ import rayTraceTypescript.objects.Translate
 import rayTraceTypescript.objects.box
 import rayTraceTypescript.objects.Sphere
 import rayTraceTypescript.objects.Mesh
-import rayTraceTypescript.render.CpuRenderer
 import rayTraceTypescript.render.PpmWriter
 import rayTraceTypescript.render.Renderer
 import rayTraceTypescript.textures.CheckerTexture
@@ -34,20 +33,23 @@ import java.nio.file.Path
 import javax.imageio.ImageIO
 
 /**
- * The GPU render must look like the CPU render. Both trace the same scene with the same
- * sample count; only the random streams differ, so the images are compared statistically.
+ * The GPU render must look like the CPU render. The CPU path tracer - the ground truth, a
+ * straight copy of the books - rendered every scene here at two seeds before it was removed, and
+ * those renders are stored in src/test/resources/cpu-reference. The GPU traces the same scene
+ * with the same sample count; only the random streams differ, so the images are compared
+ * statistically.
  */
 class GpuCpuComparisonTest {
 
     @Test
     fun `gpu matches the cpu render for every material`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("materials", materialsScene())
     }
 
     @Test
     fun `gpu matches the cpu render when samples are aimed at the lights`() {
-        assumeOpenCl()
+        assumeGpu()
         val light = Quad(
             Point(-1.5f, 3.0f, -1.5f), Vector(3.0f, 0.0f, 0.0f), Vector(0.0f, 0.0f, 3.0f),
             DiffuseLight(Color(6.0f, 6.0f, 6.0f))
@@ -64,43 +66,43 @@ class GpuCpuComparisonTest {
 
     @Test
     fun `gpu matches the cpu render for a volume`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("volume", fogScene(), lit = true)
     }
 
     @Test
     fun `gpu matches the cpu render for rotated and translated instances`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("instances", instanceScene(), lit = true)
     }
 
     @Test
     fun `gpu matches the cpu render for an emissive scene`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("emissive", lightScene(), lit = true)
     }
 
     @Test
     fun `gpu matches the cpu render for quads`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("quads", quadScene())
     }
 
     @Test
     fun `gpu matches the cpu render for perlin noise`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("perlin", noiseScene())
     }
 
     @Test
     fun `gpu matches the cpu render for an stl mesh`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("stl-mesh", meshScene())
     }
 
     @Test
     fun `gpu matches the cpu render for placed mesh blocks`() {
-        assumeOpenCl()
+        assumeGpu()
         // One prebuilt tree used three times - moved, turned and scaled - grafted into the
         // scene's tree on the GPU, and triangles moved the ordinary way on the CPU.
         val block = MeshBlock(octahedron())
@@ -118,7 +120,7 @@ class GpuCpuComparisonTest {
 
     @Test
     fun `gpu matches the cpu render for placed mesh blocks lit by a lamp`() {
-        assumeOpenCl()
+        assumeGpu()
         val block = MeshBlock(octahedron())
         val light = Quad(
             Point(-1.5f, 3.0f, -1.5f), Vector(3.0f, 0.0f, 0.0f), Vector(0.0f, 0.0f, 3.0f),
@@ -137,14 +139,14 @@ class GpuCpuComparisonTest {
 
     @Test
     fun `gpu matches the cpu render for a lone placed mesh block`() {
-        assumeOpenCl()
+        assumeGpu()
         val world = PlacedMesh(MeshBlock(octahedron()), 1.2f, 20.0f, Vector(0.0f, 0.0f, 0.0f), Lambertian(Color(0.72f, 0.38f, 0.22f)))
         assertLooksTheSame("lone-placed-block", world)
     }
 
     @Test
     fun `gpu matches the cpu render for an image texture`() {
-        assumeOpenCl()
+        assumeGpu()
         assertLooksTheSame("image-texture", imageTextureScene())
     }
 
@@ -180,20 +182,11 @@ class GpuCpuComparisonTest {
 
     /**
      * The CPU render of scene [name] at [seed], as stored in src/test/resources/cpu-reference.
-     * The CPU path tracer is the ground truth these renders were made with; with
-     * UPDATE_CPU_REFERENCES=1 they are rendered again and rewritten (only while it exists).
+     * They were rendered by the CPU path tracer, the ground truth, before it was removed; they
+     * cannot be made again, so a new scene needs references from elsewhere.
      */
     private fun cpuReference(name: String, world: Hittable, camera: Camera, seed: Long): PpmSupport.PpmImage {
         val resource = "/cpu-reference/$name-$seed.ppm.gz"
-        if (System.getenv("UPDATE_CPU_REFERENCES") == "1") {
-            val image = render(CpuRenderer(), world, camera, seed)
-            val target = java.nio.file.Paths.get("src/test/resources$resource")
-            Files.createDirectories(target.parent)
-            Files.newOutputStream(target).use { out ->
-                java.util.zip.GZIPOutputStream(out).use { it.write(PpmSupport.encode(image)) }
-            }
-            return image
-        }
         val stored = requireNotNull(javaClass.getResourceAsStream(resource)) { "Missing CPU reference $resource" }
         return PpmSupport.parse(java.util.zip.GZIPInputStream(stored).use { it.readBytes() })
     }
@@ -374,9 +367,9 @@ class GpuCpuComparisonTest {
         }
     }
 
-    private fun assumeOpenCl() {
+    private fun assumeGpu() {
         val reason = GpuRenderer.unavailabilityReason()
-        assumeTrue(reason == null, "No OpenCL device available: $reason")
+        assumeTrue(reason == null, "No CUDA device available: $reason")
     }
 
     companion object {
