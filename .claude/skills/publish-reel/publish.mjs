@@ -7,9 +7,9 @@
 //   node publish.mjs reel <file.mp4> <caption.txt> [--cover-ms=N] [--no-feed] [--audio-name=Name]
 //                                           create the container, upload, wait, publish
 //
-// The token and account live in ~/.config/koltinraytracer/instagram.json (never in the repo);
-// IG_CONFIG=<file> points elsewhere - e.g. at StlViewer's ~/.config/stlviewer/instagram.json to
-// publish on the same account, if the user decides so.
+// The token and account live in StlViewer's ~/.config/stlviewer/instagram.json (never in the
+// repo): the user decided both projects post on the same account. IG_CONFIG=<file> points
+// elsewhere.
 // Needs a token with instagram_basic, instagram_content_publish, pages_read_engagement,
 // pages_show_list (Graph API Explorer, user or Page token of the Page linked to the account).
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { join, dirname } from 'node:path';
 
 const API = 'v26.0';
 const GRAPH = `https://graph.facebook.com/${API}`;
-const CONFIG = process.env.IG_CONFIG || join(homedir(), '.config', 'koltinraytracer', 'instagram.json');
+const CONFIG = process.env.IG_CONFIG || join(homedir(), '.config', 'stlviewer', 'instagram.json');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function load() {

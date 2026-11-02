@@ -14,21 +14,20 @@ implemented Facebook Login for Business"). `add-music.mjs` puts a track under th
 The film comes from the `render-turntable` skill: `renders/<name>.mp4`, H.264 9:16 1080x1920 at
 ~9-10 Mbit/s with `-Drt.turntable.quality=max`, no sound - fine for Reels as it is.
 
-## Account and token - decide before the first post
+## Account and token
 
-- StlViewer publishes on **@kingmidasmodels** (IG id 17841465538673583), Facebook Page "Midas
-  renders", Meta app "Midas renders publisher" (id 2841776309530529); its token lives in
-  `~/.config/stlviewer/instagram.json`.
-- Here the script reads `~/.config/koltinraytracer/instagram.json` unless `IG_CONFIG=<file>`
-  says otherwise. **Whether this repo posts on the same account (`IG_CONFIG` pointing at
-  StlViewer's file) or its own (`setup` with another token) is the user's decision** - ask
-  before the first `check` or `reel`, and never copy StlViewer's file or its token anywhere.
+- **@kingmidasmodels** (IG id 17841465538673583), Facebook Page "Midas renders", Meta app
+  "Midas renders publisher" (id 2841776309530529) - the same account StlViewer posts on (the
+  user's decision, 2026-11-02).
+- The script reads StlViewer's `~/.config/stlviewer/instagram.json` (`IG_CONFIG=<file>` points
+  elsewhere). Its Page token was made long-lived on 2026-10-29 and does not expire. Use the file
+  where it is; never copy it or the token anywhere.
 - The token **never** goes into the repo, a commit, a skill, memory or a web form.
 
 ## Steps
 
-1. `node .claude/skills/publish-reel/publish.mjs check` (with `IG_CONFIG=...` if decided) -
-   account, quota (100 posts / 24 h), token expiry. A token that expires: see "Token" below.
+1. `node .claude/skills/publish-reel/publish.mjs check` - account, quota (100 posts / 24 h),
+   token expiry. A token that expires: see "Token" below.
 2. **Caption** - write it to `renders/<name>.txt` (git-ignored, next to the film):
    - one hook line in English (e.g. "The Midas touch: Yennefer of Vengerberg, turned to gold."),
    - **the model's attribution line** - required by CC-BY / CC-BY-ND licences. Models come from
@@ -36,9 +35,9 @@ The film comes from the `render-turntable` skill: `renders/<name>.mp4`, H.264 9:
      line "Uznanie autorstwa (wymagane): ..." (reading it needs the user's permission from this
      session; or ask them / the StlViewer session for the line). Yennefer's:
      "The Witcher - Yennefer" by LM3Dtisk Lukáš Mlýnek, CC-BY-ND, https://www.printables.com/model/1673033-the-witcher-yennefer
-   - a line on how it was made - StlViewer writes "Rendered in the browser with
-     simplestlviewer.com"; for this renderer the wording is the user's call (e.g. "Ray traced on
-     the GPU with KoltinRayTracer") - ask the first time,
+   - **no line on how it was made** - the user's decision (2026-11-02): no renderer, tool or
+     site name in the caption (StlViewer's "Rendered in the browser with simplestlviewer.com"
+     does not apply here),
    - a few hashtags (#3dprinting #render #raytracing #fanart #<character> ...).
 3. **Music** (optional, automatic) - see "Music" below; the result is `renders/<name>-music.mp4`.
 4. **Approval - always, for every Reel, no exceptions.** The user's standing rule: a film
@@ -69,10 +68,15 @@ the name of the Reel's own audio; library access is a partner deal). Two ways:
    takes the loudest stretch. Publish that file with `--audio-name=...`; it becomes the Reel's
    original audio. Only tracks the user may use commercially (Pixabay Music, YouTube Audio
    Library "no attribution", own music; CC-BY tracks need their credit in the caption too).
-   Keep tracks in `renders/music/` (git-ignored) with `renders/music/SOURCES.md` noting each
-   track's source and licence; **never download a track without the user's OK on the file and
-   the source**, and never put someone else's music in a file. StlViewer keeps its Pixabay
-   tracks in its own `renders/music/`; they are not copied here without the user's decision.
+   Tracks are in `renders/music/` (git-ignored): 15 Pixabay Music tracks in folders by theme -
+   `gry/` (games, e.g. The Witcher), `komiksy/` (comics), `filmy/` (films), `anime/`, `groza/`
+   (horror) - copied from StlViewer on 2026-11-02 at the user's request, with
+   `renders/music/SOURCES.md` listing each track's page and the Pixabay Content License
+   (commercial use, no attribution needed, never pass the track on as a file of its own).
+   Pick from the folder that fits the character and tell the user which track and fragment.
+   A new track goes into `SOURCES.md` with its source and licence; **never download one
+   without the user's OK on the file and the source**, and never put someone else's music in a
+   file.
 2. **Trending audio** (manual, best reach): send the user the film and the caption; they post it
    in the Instagram app and pick music there.
 
