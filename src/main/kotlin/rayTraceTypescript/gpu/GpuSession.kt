@@ -128,6 +128,34 @@ class GpuSession(initialScene: SceneBuffers, maxPixels: Int) : AutoCloseable {
         }
     }
 
+    /**
+     * All [samples] of every pixel of [setup]'s image in [mode], into [target] averaged (each
+     * launch scales by 1 / [samples]), as a series of launches each taking a slice of the
+     * samples sized to about [sliceMs]: plenty of threads to keep every SM full, and short enough
+     * for the display driver watchdog (a single launch of a heavy scene at a large size can pass
+     * its two seconds). The random streams are keyed by pixel and sample, so the slicing does not
+     * change the image. [onProgress] gets the samples done after each launch; returns the launches.
+     */
+    fun traceSliced(
+        mode: Int, setup: CameraSetup, samples: Int, target: Int = IMAGE,
+        sliceMs: Double = SLICE_MS, onProgress: ((Int) -> Unit)? = null
+    ): Int {
+        var launches = 0
+        var done = 0
+        var slice = 1
+        while (done < samples) {
+            val count = minOf(slice, samples - done)
+            val launchStart = System.nanoTime()
+            launch(mode, setup, done, count, 1.0f / samples, target)
+            val launchMs = maxOf((System.nanoTime() - launchStart) / 1_000_000.0, 1.0)
+            done += count
+            launches++
+            slice = (count * sliceMs / launchMs).toInt().coerceIn(1, count * 4)
+            onProgress?.invoke(done)
+        }
+        return launches
+    }
+
     /** Copies the first [into].size floats of [target] back to the host. */
     fun read(target: Int, into: FloatArray) {
         OpenClContext.check(clEnqueueReadBuffer(cl.queue, outputs[target], true, 0, into, null, null), "clEnqueueReadBuffer")
@@ -263,6 +291,8 @@ class GpuSession(initialScene: SceneBuffers, maxPixels: Int) : AutoCloseable {
 
         private const val CAMERA_FLOATS = 23
         private const val LOCAL_SIZE = 64L
+        /** Length [traceSliced] aims each launch at. */
+        const val SLICE_MS = 200.0
         // Unsafe math (fused multiply-adds, faster division and square roots) leaves the image
         // the same to within 0.1 of 255 per pixel at 2000 spp, and speeds the kernel up by a
         // quarter. Never -cl-fast-relaxed-math or -cl-finite-math-only: the traversal relies on

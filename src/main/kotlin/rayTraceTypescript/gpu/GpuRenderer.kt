@@ -60,17 +60,7 @@ class GpuRenderer : Renderer {
     private fun renderAll(session: GpuSession, setup: CameraSetup, mode: Int, samples: Int, target: Int): FloatArray {
         val progress = ProgressBar(PROGRESS_STEPS)
         val start = System.nanoTime()
-        var launches = 0
-        var done = 0
-        var slice = 1
-        while (done < samples) {
-            val count = minOf(slice, samples - done)
-            val launchStart = System.nanoTime()
-            session.launch(mode, setup, done, count, 1.0f / samples, target)
-            val launchMs = maxOf((System.nanoTime() - launchStart) / 1_000_000.0, 1.0)
-            done += count
-            launches++
-            slice = (count * TARGET_LAUNCH_MS / launchMs).toInt().coerceIn(1, count * 4)
+        val launches = session.traceSliced(mode, setup, samples, target, TARGET_LAUNCH_MS) { done ->
             progress.report((done.toLong() * PROGRESS_STEPS / samples).toInt())
         }
         progress.finish()
