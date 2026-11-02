@@ -41,7 +41,11 @@ class GpuSession(initialScene: SceneBuffers, maxPixels: Int) : AutoCloseable {
     /** The scene's buffers, released when it is replaced. */
     private val sceneMemory = mutableListOf<Long>()
     private val programs = HashMap<Int, Pair<Long, Long>>()
-    private val seed = RandomSource.seedValue() ?: Random.Default.nextLong()
+    /**
+     * Keys every random stream of the next launches, with the pixel and the sample. A film sets
+     * it per frame, so its frames do not all share one noise pattern.
+     */
+    var seed: Long = RandomSource.seedValue() ?: Random.Default.nextLong()
 
     private var scene = initialScene
     /** The feature switches the kernels were built with, and whether volumes need more registers. */

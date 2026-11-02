@@ -46,6 +46,12 @@ fun main() {
     // -Drt.out redirects the render, so a quick look does not overwrite the committed image.ppm.
     val output = java.nio.file.Paths.get(System.getProperty("rt.out", "image.ppm"))
 
+    // -Drt.turntable=film.mp4 renders a film of the scene's objects turning (see TurntableRender).
+    System.getProperty("rt.turntable")?.let { film ->
+        rayTraceTypescript.gpu.TurntableRender.render(scene, java.nio.file.Paths.get(film))
+        return
+    }
+
     // -Drt.gui opens the scene in a window to steer the camera with the mouse; S there saves
     // beside where -Drt.out points.
     if (System.getProperty("rt.gui") != null) {
