@@ -37,34 +37,77 @@ class Denoiser private constructor(private val library: SharedLibrary) : AutoClo
     private val executeFilter = Fn("oidnExecuteFilter", LibFFI.ffi_type_void, LibFFI.ffi_type_pointer)
     private val releaseFilter = Fn("oidnReleaseFilter", LibFFI.ffi_type_void, LibFFI.ffi_type_pointer)
 
-    /** Denoises linear [color] (3 floats per pixel, rows top to bottom) with its two guides. */
+    // The device, the filter and the four image buffers outlive one call: committing a filter
+    // allocates its scratch memory and sets the network up, which a viewer denoising the same
+    // sized image again and again should pay for once. They are rebuilt when the size changes.
+    private var device = 0L
+    private var filter = 0L
+    private var images: List<java.nio.FloatBuffer> = emptyList()
+    private var width = 0
+    private var height = 0
+
+    /**
+     * Denoises linear [color] (3 floats per pixel, rows top to bottom) with its two guides.
+     * One call at a time: the filter and its buffers are shared between calls.
+     */
+    @Synchronized
     fun denoise(width: Int, height: Int, color: FloatArray, albedo: FloatArray, normal: FloatArray): FloatArray {
-        val images = listOf(color, albedo, normal, FloatArray(color.size)).map { data ->
-            MemoryUtil.memAllocFloat(data.size).put(data).flip()
-        }
-        val device = newDevice(OIDN_DEVICE_TYPE_CPU)
+        prepare(width, height)
         try {
-            commitDevice(device)
-            val filter = newFilter(device, "RT")
-            try {
-                listOf("color", "albedo", "normal", "output").zip(images).forEach { (name, image) ->
-                    setImage(
-                        filter, name, MemoryUtil.memAddress(image), OIDN_FORMAT_FLOAT3,
-                        width.toLong(), height.toLong(), 0L, 12L, width * 12L
-                    )
-                }
-                setBool(filter, "hdr", true)
-                commitFilter(filter)
-                executeFilter(filter)
-                checkError(device)
-                return FloatArray(color.size).also { images[3].get(it) }
-            } finally {
-                releaseFilter(filter)
+            listOf(color, albedo, normal).forEachIndexed { i, data ->
+                images[i].clear()
+                images[i].put(data)
+                images[i].clear()
             }
-        } finally {
-            releaseDevice(device)
-            images.forEach { MemoryUtil.memFree(it) }
+            executeFilter(filter)
+            checkError(device)
+            return FloatArray(color.size).also {
+                images[3].clear()
+                images[3].get(it)
+                images[3].clear()
+            }
+        } catch (t: Throwable) {
+            // A failed run leaves the filter in an unknown state: the next call builds it again.
+            release()
+            throw t
         }
+    }
+
+    /** Makes the device and a committed filter for [width] x [height], unless they already are. */
+    private fun prepare(width: Int, height: Int) {
+        if (filter != 0L && width == this.width && height == this.height) return
+        releaseFilterAndImages()
+        if (device == 0L) {
+            device = newDevice(OIDN_DEVICE_TYPE_CPU)
+            commitDevice(device)
+        }
+        val floats = width * height * 3
+        images = List(4) { MemoryUtil.memAllocFloat(floats) }
+        filter = newFilter(device, "RT")
+        listOf("color", "albedo", "normal", "output").zip(images).forEach { (name, image) ->
+            setImage(
+                filter, name, MemoryUtil.memAddress(image), OIDN_FORMAT_FLOAT3,
+                width.toLong(), height.toLong(), 0L, 12L, width * 12L
+            )
+        }
+        setBool(filter, "hdr", true)
+        commitFilter(filter)
+        checkError(device)
+        this.width = width
+        this.height = height
+    }
+
+    private fun releaseFilterAndImages() {
+        if (filter != 0L) releaseFilter(filter)
+        filter = 0L
+        images.forEach { MemoryUtil.memFree(it) }
+        images = emptyList()
+    }
+
+    private fun release() {
+        releaseFilterAndImages()
+        if (device != 0L) releaseDevice(device)
+        device = 0L
     }
 
     private fun checkError(device: Long) {
@@ -78,7 +121,11 @@ class Denoiser private constructor(private val library: SharedLibrary) : AutoClo
         }
     }
 
-    override fun close() = library.free()
+    @Synchronized
+    override fun close() {
+        release()
+        library.free()
+    }
 
     /** One C function and the libffi call description for its signature. */
     private inner class Fn(name: String, private val returns: FFIType, private vararg val params: FFIType) {
