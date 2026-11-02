@@ -13,8 +13,9 @@ later backend (CUDA) against: same scene, same settings, same frames.
 
 ## How it was made
 
-Branch `gpu-max-perf`, renderer as of the turntable work on top of `1089a3e` (not yet committed
-when rendered), GTX 1070 (driver 577.00), OIDN 2.5.1 on the CPU:
+The OpenCL renderer, before the project moved to CUDA: the code that rendered it is the
+turntable work committed as `5ccf99d`..`e9a863e` on top of `1089a3e` (it was rendered just
+before those commits). GTX 1070 (driver 577.00), OIDN 2.5.1 on the CPU:
 
 ```
 mvn -q -o exec:java -Drt.scene=studio-model \

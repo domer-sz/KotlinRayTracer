@@ -96,7 +96,7 @@ normals and clamps fireflies at 16, this renderer uses flat facet normals and no
   not been timed yet - expect roughly 4 s, so ~30 min for 450 frames; measure and write it here.
 - Film frame: tracing + 32-spp guides + scene rebuild (~0.25 s flatten, ~0.17 s upload) on the
   render thread; denoise (1.5 s, OIDN on the CPU) and encoding overlap the next frame.
-- The OpenCL backend this replaced (branch `gpu-max-perf`), for comparison: still tracing 2.66 s;
+- The OpenCL backend this replaced (last in commit `1b65ee9`), for comparison: still tracing 2.66 s;
   2026-11-02, the command above (Yennefer, studio-model, 15 s, 30 fps, 1 turn, max): 450 frames
   at 3.48 s = 26 min; 17.06 MB, 9.10 Mbit/s, H.264 High, BT.709 tags. That film and its frames are
   the reference in `reference/turntable-opencl`.
