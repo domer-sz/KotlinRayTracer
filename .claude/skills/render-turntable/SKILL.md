@@ -48,7 +48,8 @@ is; don't clone it again and don't commit to it (it belongs to the StlViewer wor
 ## The command
 
 Run it in the background (`run_in_background`) - it prints a `\r` progress line, so log through
-`tr`:
+`tr`, line-buffered with `stdbuf -oL` (Git Bash has it): a plain `tr` into a file buffers 4 KB
+blocks, and on 2026-11-02 that left the log empty for the whole 24-minute film:
 
 ```
 mvn -q -o compile
@@ -57,8 +58,16 @@ mvn -q -o exec:java -Drt.scene=studio-model \
   -Drt.samples=64 \
   -Drt.turntable=renders/003-yennefer-gold-koltin-max.mp4 \
   -Drt.turntable.seconds=15 -Drt.turntable.fps=30 -Drt.turntable.turns=1 -Drt.turntable.quality=max \
-  2>&1 | tr '\r' '\n' | grep --line-buffered -v '^\s*$' > renders/003-yennefer-gold-koltin-max.log
+  2>&1 | stdbuf -oL tr '\r' '\n' | grep --line-buffered -v '^\s*$' > renders/003-yennefer-gold-koltin-max.log
 ```
+
+If the log stays empty anyway, the film is still running when `nvidia-smi` shows the GPU busy
+and `renders/<name>.part.mp4` grows; a finished film is ~17 MB, so its size gives a rough
+percentage.
+
+**A silent "tiktok" copy** (the user's standing request for every film): after the film,
+`ffmpeg -v error -y -i renders/<name>.mp4 -map 0:v -c copy -an -movflags +faststart renders/<name>-tiktok.mp4`
+- the picture copied as it is, no audio track (TikTok's own music is added in the app).
 
 Films and their logs go to `renders/` (untracked; never commit them). Name them after the model
 folder, like StlViewer does: `renders/003-yennefer-...mp4`.
@@ -67,7 +76,7 @@ While it runs, report progress every 5 minutes without being asked: arm a Monito
 ToolSearch `select:Monitor`, `timeout_ms` 1800000, re-arm on expiry) that every 300 s prints the
 last `[film] frame N of M, X s a frame, about T s left` line of the log, and also the end and
 failures (`Film saved|Exception|Error|BUILD FAILURE`) - silence must not look like progress. The
-log fills in blocks (`tr` buffers), so a line can lag a minute. If no event has arrived after
+log fills line by line with `stdbuf -oL`; without it, it fills in blocks. If no event has arrived after
 about 6 minutes, read the last `[film]` line of the log yourself and report it - a quiet
 monitor has happened before.
 
@@ -126,7 +135,9 @@ normals and no clamp.
 ## Measured (GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
 
 - CUDA (the renderer now), 2026-11-02: a 30-frame film with the command's settings took 8.8 s
-  for the first frame (model tree and kernels built) and then 3.0-3.2 s a frame (frames 10-30),
+  for the first frame (model tree and kernels built) and then 3.0-3.2 s a frame (frames 10-30).
+  Full film, same day: Master Chief CC0 (1 184 002 triangles), 450 frames at 3.18 s = 23.9 min,
+  17.1 MB, 9.14 Mbit/s,
   so 450 frames take ~24 min. A still on its own traces in 3.27 s; at 256 spp 11.7 s of GPU time.
 - Film frame: tracing + 32-spp guides + scene rebuild (~0.25 s flatten, ~0.17 s upload) on the
   render thread; denoise (1.5 s, OIDN on the CPU) and encoding overlap the next frame.
