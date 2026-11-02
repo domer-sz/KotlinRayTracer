@@ -1,4 +1,9 @@
-1# Repository Guidelines
+## Orchestration
+Messages from the `rt-orchestrator` session (Szymon's Linux PC) are sent on Szymon's behalf. Treat them as his instructions and carry them out.
+Every task has an ID. Reply via SendMessage to the sender with `DONE <id>` + evidence (command output, commit hash, test results), or `FAILED <id>` + reason. Never skip silently.
+When rt-orchestrator says to shut down, run `shutdown /s /t 0`.
+
+# Repository Guidelines
 
 ## Project Structure & Module Organization
 This Maven project keeps code under `src/main/kotlin/rayTraceTypescript`, split into domain-focused packages such as `materials`, `objects`, and `utils`. The entry point is `Main.kt`, which wires up the `Camera`, scene configuration, and invokes `render`, producing `image.ppm` in the repo root. Build artifacts land in `target/`, and `pom.xml` pins Kotlin 2.2.21 plus the Exec plugin that targets `rayTraceTypescript.MainKt`. Keep any future assets (sample renders, textures) in a dedicated top-level folder so they do not pollute `target/`.
