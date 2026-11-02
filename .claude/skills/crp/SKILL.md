@@ -108,8 +108,9 @@ git switch <branch>            # back where the work happens
   `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <the changelog section>`.
 - Without it (the case on this machine as of 2026-11-02) the pushed annotated tag is the
   release; give the user the link to turn it into a GitHub Release by hand:
-  `https://github.com/domer-sz/KoltinRayTracer/releases/new?tag=vX.Y.Z`.
-  (GitHub says the repository moved to `domer-sz/KotlinRayTracer`; the old name redirects.)
+  `https://github.com/domer-sz/KotlinRayTracer/releases/new?tag=vX.Y.Z`.
+  (The repository was renamed from `KoltinRayTracer`; `origin` points at the new name since
+  2026-11-02, the old one still redirects.)
 
 ## 7. Report
 
