@@ -40,18 +40,25 @@ The film comes from the `render-turntable` skill: `renders/<name>.mp4`, H.264 9:
      site name in the caption (StlViewer's "Rendered in the browser with simplestlviewer.com"
      does not apply here),
    - a few hashtags (#3dprinting #render #raytracing #fanart #<character> ...).
-3. **Music** (optional, automatic) - see "Music" below; the result is `renders/<name>-music.mp4`.
+3. **The two films** - the user's standing rule (2026-11-02): preparing a film for publishing
+   always ends with **two files** next to the render:
+   - `renders/<name>-ig.mp4` - **with music**, for Instagram (see "Music" below):
+     `node .claude/skills/publish-reel/add-music.mjs renders/<name>.mp4 <track> renders/<name>-ig.mp4 --start=auto`
+   - `renders/<name>-tiktok.mp4` - **without sound**, for TikTok (its music is added in the app):
+     `ffmpeg -v error -y -i renders/<name>.mp4 -map 0:v -c copy -an -movflags +faststart renders/<name>-tiktok.mp4`
+   Both keep the render's picture untouched (stream copy). Check each with ffprobe: `-ig` has an
+   aac audio stream, `-tiktok` has none.
 4. **Approval - always, for every Reel, no exceptions.** The user's standing rule: a film
    prepared for publishing must be approved before it is published. Send the user (SendUserFile,
-   so it reaches their phone) **the exact file that will be published** - the final MP4 with the
-   music already in it, not the silent render - plus the cover frame (extract it with
+   so it reaches their phone) **the exact file that will be published** - `<name>-ig.mp4`, with the
+   music already in it, not the silent render - plus `<name>-tiktok.mp4`, plus the cover frame (extract it with
    `ffmpeg -ss <s> -i <film> -frames:v 1 <cover.png>`), and show the full caption and the audio
    name. Then wait for an explicit "tak"/yes to *that* version **from the user**. Any change after
    the approval (other music fragment, caption, cover, re-render) needs a new approval.
    Publishing is public and can't be quietly undone; never publish on your own initiative, and
    an earlier "publish X" - from the user or from a managing session such as rt-orchestrator - is
    not approval of a film the user hasn't seen.
-5. `node .claude/skills/publish-reel/publish.mjs reel renders/<name>-music.mp4 renders/<name>.txt`
+5. `node .claude/skills/publish-reel/publish.mjs reel renders/<name>-ig.mp4 renders/<name>.txt`
    (`--cover-ms=N` picks the cover frame at N ms, `--no-feed` keeps it off the grid,
    `--audio-name="Midas - <Character>"` names the Reel's own audio - it can be set only once).
    There is no dry run: it publishes as soon as Instagram has processed the upload. It prints the
@@ -64,7 +71,8 @@ The public Graph API has no field for Instagram's licensed music library (only `
 the name of the Reel's own audio; library access is a partner deal). Two ways:
 
 1. **Track in the file** (automatic):
-   `node .claude/skills/publish-reel/add-music.mjs renders/<film>.mp4 <track> [renders/<film>-music.mp4] [--start=S|auto] [--fade-out=S]`
+   `node .claude/skills/publish-reel/add-music.mjs renders/<film>.mp4 <track> renders/<film>-ig.mp4 [--start=S|auto] [--fade-out=S]`
+   (name the output `-ig` explicitly - left out, the script writes `<film>-music.mp4`)
    - cuts the track to the film, fades it, -14 LUFS, video copied untouched; `--start=auto`
    takes the loudest stretch. Publish that file with `--audio-name=...`; it becomes the Reel's
    original audio. Only tracks the user may use commercially (Pixabay Music, YouTube Audio

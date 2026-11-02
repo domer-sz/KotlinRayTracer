@@ -65,9 +65,9 @@ If the log stays empty anyway, the film is still running when `nvidia-smi` shows
 and `renders/<name>.part.mp4` grows; a finished film is ~17 MB, so its size gives a rough
 percentage.
 
-**A silent "tiktok" copy** (the user's standing request for every film): after the film,
-`ffmpeg -v error -y -i renders/<name>.mp4 -map 0:v -c copy -an -movflags +faststart renders/<name>-tiktok.mp4`
-- the picture copied as it is, no audio track (TikTok's own music is added in the app).
+**Publishing copies** come from the `publish-reel` skill's preparation, not from here: it makes
+`renders/<name>-ig.mp4` (with music, for Instagram) and `renders/<name>-tiktok.mp4` (without
+sound, for TikTok) from the render.
 
 Films and their logs go to `renders/` (untracked; never commit them). Name them after the model
 folder, like StlViewer does: `renders/003-yennefer-...mp4`.
