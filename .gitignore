@@ -1,1 +1,4 @@
 target
+# Films are large: the turntable reference keeps its frames in git, the MP4 stays local.
+reference/**/*.mp4
+renders/
