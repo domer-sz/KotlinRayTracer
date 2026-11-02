@@ -12,14 +12,18 @@ code does and why: `AGENTS.md`, section *Turntable Films*.
 
 ## Before starting
 
-- **The GPU is exclusive.** A film keeps the GTX 1070 busy for ~25 min. If the StlViewer session
+- **CUDA renders it.** It needs an NVIDIA card and driver; the kernel compiler (NVRTC) ships in
+  `native/cuda/windows-x64`, so run from the repository root (or point `-Drt.nvrtc=<dir>` at it).
+  "GPU rendering unavailable" or "NVRTC not found" means one of those is missing - there is no
+  CPU or OpenCL fallback any more.
+- **The GPU is exclusive.** A film keeps the GTX 1070 busy for ~24 min. If the StlViewer session
   (`stl-viewer` in ListAgents) may be rendering, tell it before you start and send "GPU wolne"
   when done; two renders at once spoil both timings and risk a driver reset (TDR).
 - **ffmpeg** must run: `ffmpeg -version` (scoop: `~/scoop/shims/ffmpeg.exe`). Elsewhere point
   `-Drt.ffmpeg=<path>` or `FFMPEG` at it. Without it the film stops with that message.
 - **A new look gets a still first.** For a scene or setting the user has not seen yet, render one
   frame (the same command without `-Drt.turntable`, it writes PPM + PNG + `-denoised`) and send it
-  (SendUserFile) before spending 25 min on the film. Skip this when the user asks for the film
+  (SendUserFile) before spending 24 min on the film. Skip this when the user asks for the film
   directly or the look is already approved.
 
 ## The command
@@ -84,16 +88,27 @@ In the viewer (`-Drt.gui`), the panel's *Film obrotowy…* button does the same 
 3. Tell the user where it is and send it (SendUserFile) when they may be on another device;
    tell the StlViewer session "GPU wolne" if you reserved the card.
 
+To check the renderer itself, compare a raw still (the command without `-Drt.turntable`, with
+`-Drt.denoise=off -Drt.seed=<n>`) against the OpenCL stills in `reference/turntable-opencl`
+(`still-64spp-seed1.png`, `-seed2.png`): `ffmpeg -i <still.png> -i <reference.png> -lavfi
+"[0][1]psnr" -f null -`. Two OpenCL seeds sit 27.93 dB / SSIM 0.847 apart, and CUDA lands there
+too; clearly lower means the image changed, not just its noise.
+
 To compare with StlViewer's film, export frames 0 and 225 (`-vf "select=eq(n\,0)"`) and ask
-the StlViewer session to compute PSNR/SSIM against its
-`renders/003-yennefer-gold-v4-max-frame.png` / `-frame225.png` (that folder is outside this repo;
-reading it needs the user's permission). Expect systematic differences: StlViewer smooths vertex
-normals and clamps fireflies at 16, this renderer uses flat facet normals and no clamp.
+the StlViewer session to compute PSNR/SSIM against frames decoded from its own film,
+`renders/v4-film-frame0-decoded.png` / `v4-film-frame225-decoded.png` in its repository (that
+folder is outside this one; reading it needs the user's permission). Not against
+`003-yennefer-gold-v4-max-frame.png`: StlViewer confirmed that one is another angle, not frame 0.
+Expect a systematic gap, not noise: frame 0 came out at 25.8 dB / SSIM 0.887 and frame 225 at
+24.5 / 0.879, against ~32.7 / 0.90 for StlViewer's film vs its own 2048-spp reference.
+StlViewer smooths vertex normals and clamps fireflies at 16; this renderer uses flat facet
+normals and no clamp.
 
 ## Measured (GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
 
-- CUDA (the renderer now): still tracing 3.27 s; at 256 spp 11.7 s of GPU time. A film frame has
-  not been timed yet - expect roughly 4 s, so ~30 min for 450 frames; measure and write it here.
+- CUDA (the renderer now), 2026-11-02: a 30-frame film with the command's settings took 8.8 s
+  for the first frame (model tree and kernels built) and then 3.0-3.2 s a frame (frames 10-30),
+  so 450 frames take ~24 min. A still on its own traces in 3.27 s; at 256 spp 11.7 s of GPU time.
 - Film frame: tracing + 32-spp guides + scene rebuild (~0.25 s flatten, ~0.17 s upload) on the
   render thread; denoise (1.5 s, OIDN on the CPU) and encoding overlap the next frame.
 - The OpenCL backend this replaced (last in commit `1b65ee9`), for comparison: still tracing 2.66 s;
