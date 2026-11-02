@@ -32,8 +32,9 @@ The film comes from the `render-turntable` skill: `renders/<name>.mp4`, H.264 9:
    - one hook line in English (e.g. "The Midas touch: Yennefer of Vengerberg, turned to gold."),
    - **the model's attribution line** - required by CC-BY / CC-BY-ND licences. Models come from
      StlViewer's model repository: `C:/Users/szymondomeracki/Documents/projects/StlViewer/models-to-render/models/NNN_*/INFO.md`,
-     line "Uznanie autorstwa (wymagane): ..." (reading it needs the user's permission from this
-     session; or ask them / the StlViewer session for the line). Yennefer's:
+     line "Uznanie autorstwa (wymagane): ..." - the repository is a working directory of this
+     session, so read it straight from there, and check its "Licencja – co wolno" section: an
+     NC, NC-ND or personal-use model is not for a Reel. Yennefer's:
      "The Witcher - Yennefer" by LM3Dtisk Lukáš Mlýnek, CC-BY-ND, https://www.printables.com/model/1673033-the-witcher-yennefer
    - **no line on how it was made** - the user's decision (2026-11-02): no renderer, tool or
      site name in the caption (StlViewer's "Rendered in the browser with simplestlviewer.com"

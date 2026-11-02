@@ -26,6 +26,25 @@ code does and why: `AGENTS.md`, section *Turntable Films*.
   (SendUserFile) before spending 24 min on the film. Skip this when the user asks for the film
   directly or the look is already approved.
 
+## Where the models come from
+
+The STL models repository `domer-sz/models-to-render` is checked out (14 GB) inside StlViewer:
+`C:/Users/szymondomeracki/Documents/projects/StlViewer/models-to-render` - a working directory of
+this session (`.claude/settings.local.json`), so its files can be read directly. Use it where it
+is; don't clone it again and don't commit to it (it belongs to the StlViewer work).
+
+- `models/<nr>_<character>/` holds each character's recommended model (95 of 99) at full
+  resolution, z-up (studio-model and cornell-model stand STL/3MF up from z), plus `INFO.md`:
+  author, licence, "Licencja – co wolno", the ready attribution line, triangle counts.
+- `MODELE.md` is the table of all characters, licences (🟢 commercial OK, 🟡 no modifications,
+  🟠/🔴 non-commercial only, ⚪ personal use) and alternatives; `data/models.json` the same for
+  scripts.
+- Files over 99 MiB are zipped (`*.stl.zip`, sometimes split `.001`, `.002`): unpack them with
+  `python3 tools/unpack_models.py` run in that repository (the unpacked files are git-ignored
+  there) - or ask before touching it.
+- Check the licence before a model goes into anything published: NC / NC-ND / personal-use
+  models are not for a Reel; CC-BY and CC-BY-ND need the attribution line from `INFO.md`.
+
 ## The command
 
 Run it in the background (`run_in_background`) - it prints a `\r` progress line, so log through
