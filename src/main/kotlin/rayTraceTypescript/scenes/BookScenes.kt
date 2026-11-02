@@ -609,7 +609,9 @@ object BookScenes {
         val gold = Metal(Color(0.9f, 0.7f, 0.3f), 0.05f)
         val mesh = MeshLoader.load(path).zUpToYUp().rotatedY(turn).standingOnFloor(targetHeight = height)
         println("Loaded ${mesh.triangleCount} triangles from $path")
-        val figure = BvhNode(HittableList(mesh.toHittables(gold).toMutableList()))
+        // A placed mesh: its tree is built once, so turning it (the viewer, a turntable film)
+        // copies that tree in instead of building it again.
+        val figure = rayTraceTypescript.gpu.PlacedMesh(rayTraceTypescript.gpu.MeshBlock(mesh), 1f, 0f, Vector(0f, 0f, 0f), gold)
 
         // Floor, wall, lamps and camera exactly as StlViewer dumped them for this figure at
         // angle 0 (renders/yenn-scene-dump.json there): the camera stands 45 degrees round the

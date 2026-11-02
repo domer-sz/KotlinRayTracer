@@ -31,6 +31,9 @@ internal object MaterialSwap {
         is RotateY -> RotateY(rebuild(h.obj, swap), Math.toDegrees(atan2(h.sinTheta, h.cosTheta).toDouble()).toFloat())
         is BvhNode -> BvhNode(HittableList(leaves(h).map { rebuild(it, swap) }.toMutableList()))
         is HittableList -> HittableList(h.objects.map { rebuild(it, swap) }.toMutableList())
+        is rayTraceTypescript.gpu.PlacedMesh -> rayTraceTypescript.gpu.PlacedMesh(
+            h.block, h.scale, h.degrees, h.offset, swap(h.material), h.palette?.map(swap)
+        )
         else -> h
     }
 
@@ -43,6 +46,7 @@ internal object MaterialSwap {
         is RotateY -> firstMaterial(h.obj)
         is BvhNode -> leaves(h).firstNotNullOfOrNull { firstMaterial(it) }
         is HittableList -> h.objects.firstNotNullOfOrNull { firstMaterial(it) }
+        is rayTraceTypescript.gpu.PlacedMesh -> h.material
         else -> null
     }
 

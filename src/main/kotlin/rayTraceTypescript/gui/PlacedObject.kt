@@ -135,8 +135,13 @@ class BuiltInObject(val part: ScenePart) : Movable, SceneMaterial {
 
     private fun placed(h: Hittable): Hittable {
         if (!moved) return h
-        val centred = Translate(h, Vector(-home[0].toFloat(), -home[1].toFloat(), -home[2].toFloat()))
-        return Translate(RotateY(centred, rotation.toFloat()), Vector(x.toFloat(), y.toFloat(), z.toFloat()))
+        // A part that is a placed mesh stays one, so moving it copies its tree in instead of rebuilding it.
+        return rayTraceTypescript.gpu.Placement.moved(
+            h,
+            Vector(home[0].toFloat(), home[1].toFloat(), home[2].toFloat()),
+            rotation.toFloat(),
+            Vector(x.toFloat(), y.toFloat(), z.toFloat())
+        )
     }
 
     override fun localBounds(): FloatArray {
