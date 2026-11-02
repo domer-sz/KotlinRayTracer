@@ -140,7 +140,7 @@ class CudaContext private constructor(
         /** Where the repository keeps NVRTC, relative to the project root. */
         private const val BUNDLED_NVRTC = "native/cuda/windows-x64"
         private const val NVRTC_DLL = "nvrtc64_120_0.dll"
-        private const val NVRTC_BUILTINS_DLL = "nvrtc-builtins64_126.dll"
+        private val NVRTC_BUILTINS_DLL = Regex("nvrtc-builtins64_\\d+\\.dll", RegexOption.IGNORE_CASE)
 
         @Volatile private var initialised = false
 
@@ -187,9 +187,10 @@ class CudaContext private constructor(
             // loads its builtins by name, which Windows would not look for beside it.
             val folder = nvrtcFolder()
             val compiler = File(folder, NVRTC_DLL)
-            val builtins = File(folder, NVRTC_BUILTINS_DLL)
-            if (!compiler.isFile || !builtins.isFile) {
-                throw CudaException("NVRTC not found: expected $NVRTC_DLL and $NVRTC_BUILTINS_DLL in ${folder.absolutePath} (-Drt.nvrtc / NVRTC_DIR)")
+            // The builtins carry the minor version in their name (nvrtc-builtins64_126.dll for 12.6).
+            val builtins = folder.listFiles { f -> f.name.matches(NVRTC_BUILTINS_DLL) }?.maxByOrNull { it.name }
+            if (!compiler.isFile || builtins == null) {
+                throw CudaException("NVRTC not found: expected $NVRTC_DLL and nvrtc-builtins64_12x.dll in ${folder.absolutePath} (-Drt.nvrtc / NVRTC_DIR)")
             }
             if (Configuration.CUDA_NVRTC_LIBRARY_NAME.get() == null) Configuration.CUDA_NVRTC_LIBRARY_NAME.set(compiler.absolutePath)
             if (Configuration.CUDA_NVRTC_BUILTINS_LIBRARY_NAME.get() == null) {
