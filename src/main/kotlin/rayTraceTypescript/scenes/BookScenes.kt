@@ -45,7 +45,8 @@ object BookScenes {
         "cornell-final" to { cornellFinal() },
         "cornell-model" to { cornellModel() },
         "showcase" to { showcase() },
-        "model" to { model() }
+        "model" to { model() },
+        "studio-model" to { studioModel() }
     )
 
     val names: List<String> get() = scenes.keys.toList()
@@ -588,4 +589,74 @@ object BookScenes {
         objects.addAll(mesh.toHittables(material))
         return HittableList(mutableListOf(BvhNode(HittableList(objects))))
     }
+
+    /**
+     * Not from the books: a port of StlViewer's "gold-reel" studio, so the same model can be
+     * timed and compared against that browser renderer. A gold figure on a glossy black floor in
+     * front of a navy wall, three softbox lamps (key, fill, rim) aimed at the figure's chest,
+     * a flat dark backdrop, a 1080x1920 portrait frame. The figure is scaled so its bounding
+     * box has a half diagonal of 1 / 0.6162 (height 1.6226), which is what the lamps and the
+     * camera there are laid out around. Meant for z-up STL files: -Drt.model=<path>.
+     * -Drt.studio.turn=<degrees> spins the figure about the vertical axis.
+     */
+    fun studioModel(): SceneDefinition {
+        val path = System.getProperty("rt.model") ?: System.getenv("MODEL_FILE") ?: "model.stl"
+        val turn = System.getProperty("rt.studio.turn")?.toFloatOrNull() ?: 0.0f
+        val height = STUDIO_HEIGHT
+        // -0.4 EV on the emitters (lamps and backdrop): everything else only reflects them.
+        val exposure = Math.pow(2.0, -0.4).toFloat()
+
+        val gold = Metal(Color(0.9f, 0.7f, 0.3f), 0.05f)
+        val mesh = MeshLoader.load(path).zUpToYUp().rotatedY(turn).standingOnFloor(targetHeight = height)
+        println("Loaded ${mesh.triangleCount} triangles from $path")
+        val figure = BvhNode(HittableList(mesh.toHittables(gold).toMutableList()))
+
+        // Floor, wall, lamps and camera exactly as StlViewer dumped them for this figure at
+        // angle 0 (renders/yenn-scene-dump.json there): the camera stands 45 degrees round the
+        // figure, and the wall and lamps are laid out round it.
+        val floor = Quad(
+            Point(-48.6785f, 0f, -48.6785f), Vector(0f, 0f, 97.3571f), Vector(97.3571f, 0f, 0f),
+            Metal(Color(0.22f, 0.22f, 0.25f), 0.004f)
+        )
+        val wall = Quad(
+            Point(37.863f, 64.9047f, -53.9261f), Vector(-91.7891f, 0f, 91.7891f), Vector(0f, -64.9047f, 0f),
+            Lambertian(Color(0.009696f, 0.038473f, 0.173439f))
+        )
+        fun softbox(corner: Point, u: Vector, v: Vector, power: Float): Quad {
+            val level = power * exposure
+            return Quad(corner, u, v, DiffuseLight(Color(level, level, level)))
+        }
+        val key = softbox(Point(-1.8395f, 4.4035f, -0.3628f), Vector(1.8774f, 0f, 2.2374f), Vector(-1.7139f, -1.8774f, 1.4382f), 8f)
+        val fill = softbox(Point(2.855f, 3.3234f, 1.4604f), Vector(0f, 0f, -2.9207f), Vector(0.9989f, -2.7446f, 0f), 4f)
+        val rim = softbox(Point(1.5331f, 3.2739f, -2.3362f), Vector(-1.6927f, 0f, -0.4536f), Vector(0.2268f, -1.5176f, -0.8464f), 12f)
+
+        val target = Point(0.0011f, 0.7258f, 0.0002f)
+        val eye = Point(2.3622f, 1.3017f, 2.3613f)
+        val sky = Color(0.000805f, 0.002263f, 0.010398f) * exposure
+
+        val world = HittableList(mutableListOf(floor, wall, key, fill, rim, figure))
+        return SceneDefinition(
+            name = "studio-model",
+            world = world,
+            camera = Camera().apply {
+                aspectRatio = 9.0f / 16.0f
+                imageWidth = 1080
+                samplesPerPixel = 64
+                maxReflectionDepth = 8
+                background = sky
+                vfov = 45.0f
+                lookFrom = eye
+                lookAt = target
+                vUp = Vector(0f, 1f, 0f)
+                // 0.4 degrees of aperture, focused on the figure's axis.
+                defocusAngle = 0.4f
+                focusDistance = 3.3883f
+                lights = HittableList(mutableListOf(key, fill, rim))
+            },
+            parts = listOf(ScenePart("Figura", figure))
+        )
+    }
+
+    /** Height of the studio figure, which fixes the scale everything else is laid out in. */
+    private const val STUDIO_HEIGHT = 1.6226f
 }
