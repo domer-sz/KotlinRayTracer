@@ -26,6 +26,15 @@ object PpmSupport {
         return PpmImage(width, height, pixels)
     }
 
+    /** [image] as an ASCII PPM again, for storing a reference. */
+    fun encode(image: PpmImage): ByteArray {
+        val text = StringBuilder("P3\n${image.width} ${image.height}\n255\n")
+        for (i in image.pixels.indices step 3) {
+            text.append(image.pixels[i]).append(' ').append(image.pixels[i + 1]).append(' ').append(image.pixels[i + 2]).append('\n')
+        }
+        return text.toString().toByteArray(StandardCharsets.UTF_8)
+    }
+
     fun diff(expected: PpmImage, actual: PpmImage, highDiffThreshold: Int): DiffStats {
         require(expected.pixels.size == actual.pixels.size) { "Pixel counts differ" }
         var sum = 0.0f

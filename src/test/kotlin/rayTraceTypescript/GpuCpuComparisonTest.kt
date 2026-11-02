@@ -42,7 +42,7 @@ class GpuCpuComparisonTest {
     @Test
     fun `gpu matches the cpu render for every material`() {
         assumeOpenCl()
-        assertLooksTheSame(materialsScene())
+        assertLooksTheSame("materials", materialsScene())
     }
 
     @Test
@@ -59,43 +59,43 @@ class GpuCpuComparisonTest {
                 light
             )
         )
-        assertLooksTheSame(world, lit = true, lights = light)
+        assertLooksTheSame("aimed-at-lights", world, lit = true, lights = light)
     }
 
     @Test
     fun `gpu matches the cpu render for a volume`() {
         assumeOpenCl()
-        assertLooksTheSame(fogScene(), lit = true)
+        assertLooksTheSame("volume", fogScene(), lit = true)
     }
 
     @Test
     fun `gpu matches the cpu render for rotated and translated instances`() {
         assumeOpenCl()
-        assertLooksTheSame(instanceScene(), lit = true)
+        assertLooksTheSame("instances", instanceScene(), lit = true)
     }
 
     @Test
     fun `gpu matches the cpu render for an emissive scene`() {
         assumeOpenCl()
-        assertLooksTheSame(lightScene(), lit = true)
+        assertLooksTheSame("emissive", lightScene(), lit = true)
     }
 
     @Test
     fun `gpu matches the cpu render for quads`() {
         assumeOpenCl()
-        assertLooksTheSame(quadScene())
+        assertLooksTheSame("quads", quadScene())
     }
 
     @Test
     fun `gpu matches the cpu render for perlin noise`() {
         assumeOpenCl()
-        assertLooksTheSame(noiseScene())
+        assertLooksTheSame("perlin", noiseScene())
     }
 
     @Test
     fun `gpu matches the cpu render for an stl mesh`() {
         assumeOpenCl()
-        assertLooksTheSame(meshScene())
+        assertLooksTheSame("stl-mesh", meshScene())
     }
 
     @Test
@@ -113,7 +113,7 @@ class GpuCpuComparisonTest {
                 PlacedMesh(block, 1.4f, -110.0f, Vector(1.2f, 0.3f, -0.8f), Lambertian(Color(0.2f, 0.4f, 0.7f)))
             )
         )
-        assertLooksTheSame(world)
+        assertLooksTheSame("placed-blocks", world)
     }
 
     @Test
@@ -132,20 +132,20 @@ class GpuCpuComparisonTest {
                 light
             )
         )
-        assertLooksTheSame(world, lit = true, lights = light)
+        assertLooksTheSame("placed-blocks-lit", world, lit = true, lights = light)
     }
 
     @Test
     fun `gpu matches the cpu render for a lone placed mesh block`() {
         assumeOpenCl()
         val world = PlacedMesh(MeshBlock(octahedron()), 1.2f, 20.0f, Vector(0.0f, 0.0f, 0.0f), Lambertian(Color(0.72f, 0.38f, 0.22f)))
-        assertLooksTheSame(world)
+        assertLooksTheSame("lone-placed-block", world)
     }
 
     @Test
     fun `gpu matches the cpu render for an image texture`() {
         assumeOpenCl()
-        assertLooksTheSame(imageTextureScene())
+        assertLooksTheSame("image-texture", imageTextureScene())
     }
 
     /**
@@ -153,13 +153,13 @@ class GpuCpuComparisonTest {
      * differs. The yardstick is therefore the noise itself: how far the GPU image sits from a
      * CPU image must be no worse than how far two CPU images with different seeds sit apart.
      */
-    private fun assertLooksTheSame(world: Hittable, lit: Boolean = false, lights: Hittable? = null) {
+    private fun assertLooksTheSame(name: String, world: Hittable, lit: Boolean = false, lights: Hittable? = null) {
         val camera = testCamera().apply {
             if (lit) background = Color(0f, 0f, 0f)
             this.lights = lights
         }
-        val cpu = render(CpuRenderer(), world, camera, SEED)
-        val cpuOtherSeed = render(CpuRenderer(), world, camera, OTHER_SEED)
+        val cpu = cpuReference(name, world, camera, SEED)
+        val cpuOtherSeed = cpuReference(name, world, camera, OTHER_SEED)
         val gpu = render(GpuRenderer(), world, camera, SEED)
 
         val noise = PpmSupport.diff(cpu, cpuOtherSeed, HIGH_DIFF_THRESHOLD)
@@ -176,6 +176,26 @@ class GpuCpuComparisonTest {
             "${actual.highDiffCount} channels differ by >= $HIGH_DIFF_THRESHOLD " +
                 "(CPU-to-CPU noise produces ${noise.highDiffCount})"
         )
+    }
+
+    /**
+     * The CPU render of scene [name] at [seed], as stored in src/test/resources/cpu-reference.
+     * The CPU path tracer is the ground truth these renders were made with; with
+     * UPDATE_CPU_REFERENCES=1 they are rendered again and rewritten (only while it exists).
+     */
+    private fun cpuReference(name: String, world: Hittable, camera: Camera, seed: Long): PpmSupport.PpmImage {
+        val resource = "/cpu-reference/$name-$seed.ppm.gz"
+        if (System.getenv("UPDATE_CPU_REFERENCES") == "1") {
+            val image = render(CpuRenderer(), world, camera, seed)
+            val target = java.nio.file.Paths.get("src/test/resources$resource")
+            Files.createDirectories(target.parent)
+            Files.newOutputStream(target).use { out ->
+                java.util.zip.GZIPOutputStream(out).use { it.write(PpmSupport.encode(image)) }
+            }
+            return image
+        }
+        val stored = requireNotNull(javaClass.getResourceAsStream(resource)) { "Missing CPU reference $resource" }
+        return PpmSupport.parse(java.util.zip.GZIPInputStream(stored).use { it.readBytes() })
     }
 
     private fun render(renderer: Renderer, world: Hittable, camera: Camera, seed: Long): PpmSupport.PpmImage {
@@ -291,7 +311,13 @@ class GpuCpuComparisonTest {
 
     /** The marble texture, which the GPU reads from the same lattice the CPU built. */
     private fun noiseScene(): Hittable {
-        val marble = NoiseTexture(4.0f)
+        // Perlin draws its tables when built: a pinned seed makes them match the stored CPU render.
+        RandomSource.withSeed(SCENE_SEED)
+        val marble = try {
+            NoiseTexture(4.0f)
+        } finally {
+            RandomSource.reset()
+        }
         return HittableList(
             mutableListOf(
                 Sphere(Point(0.0f, -1000.0f, 0.0f), 1000.0f, Lambertian(marble)),
@@ -356,6 +382,8 @@ class GpuCpuComparisonTest {
     companion object {
         private const val SEED = 4242L
         private const val OTHER_SEED = 1337L
+        /** Seeds the random parts of a scene itself (Perlin tables), so stored renders stay valid. */
+        private const val SCENE_SEED = 77L
 
         private const val HIGH_DIFF_THRESHOLD = 64
         /** Headroom over the CPU-to-CPU noise floor, for float differences between devices. */

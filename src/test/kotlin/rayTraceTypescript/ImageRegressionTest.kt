@@ -2,83 +2,105 @@ package rayTraceTypescript
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
+import rayTraceTypescript.gpu.GpuRenderer
 import rayTraceTypescript.render.CpuRenderer
 import rayTraceTypescript.render.PpmWriter
+import rayTraceTypescript.render.Renderer
 import rayTraceTypescript.utils.RandomSource
 
+/**
+ * The One Weekend finale, rendered by the GPU, must look like the golden image - a CPU render
+ * with a pinned seed, stored in src/test/resources. The GPU draws other random numbers, so the
+ * yardstick is the noise: a second CPU render with another seed, stored beside it.
+ */
 class ImageRegressionTest {
     @Test
     fun `rendered ppm stays close to golden image`() {
-        val reference = PpmSupport.parse(loadReferenceImage())
-        val actual = renderCurrentScene()
-        assertEquals(reference.width, actual.width, "reference width")
-        assertEquals(reference.height, actual.height, "reference height")
+        val reason = GpuRenderer.unavailabilityReason()
+        assumeTrue(reason == null, "No GPU available: $reason")
+        val golden = PpmSupport.parse(loadReference(GOLDEN))
+        val otherSeed = PpmSupport.parse(loadReference(OTHER_SEED_REFERENCE))
+        val actual = render(GpuRenderer(), SEED)
+        assertEquals(golden.width, actual.width, "reference width")
+        assertEquals(golden.height, actual.height, "reference height")
 
-        val diff = PpmSupport.diff(reference, actual, HIGH_DIFF_THRESHOLD)
-        // Ziarno RNG ustawiamy w teście, więc oczekujemy zerowych różnic między renderami.
+        val noise = PpmSupport.diff(golden, otherSeed, HIGH_DIFF_THRESHOLD)
+        val diff = PpmSupport.diff(golden, actual, HIGH_DIFF_THRESHOLD)
+        val allowedMean = noise.meanAbsDiff * NOISE_TOLERANCE
         assertTrue(
-            diff.meanAbsDiff <= MEAN_ABS_DIFF_THRESHOLD,
-            "Mean absolute difference ${diff.meanAbsDiff} exceeds $MEAN_ABS_DIFF_THRESHOLD"
+            diff.meanAbsDiff <= allowedMean,
+            "GPU differs from the golden image by ${diff.meanAbsDiff} on average (max ${diff.maxDiff}); " +
+                "two CPU seeds differ by ${noise.meanAbsDiff}, so anything above $allowedMean is a real difference"
         )
         assertTrue(
-            diff.highDiffCount <= MAX_HIGH_DIFF_CHANNELS,
-            "${diff.highDiffCount} channels differ by >= $HIGH_DIFF_THRESHOLD (max ${diff.maxDiff})"
+            diff.highDiffCount <= maxOf(noise.highDiffCount * 2, MIN_HIGH_DIFF_CHANNELS),
+            "${diff.highDiffCount} channels differ by >= $HIGH_DIFF_THRESHOLD (CPU-to-CPU noise produces ${noise.highDiffCount})"
         )
     }
 
-    private fun renderCurrentScene(): PpmSupport.PpmImage {
-        val camera = Camera().apply {
-            aspectRatio = 16.0f / 9.0f
-            imageWidth = 300
-            samplesPerPixel = 50
-            maxReflectionDepth = 45
-            vfov = 20.0f
-            lookFrom = Point(13.0f, 2.0f, 3.0f)
-            lookAt = Point(0.0f, 0.0f, 0.0f)
-            vUp = Vector(0.0f, 1.0f, 0.0f)
-            defocusAngle = 0.6f
-            focusDistance = 10.0f
-        }
+    /**
+     * With UPDATE_REFERENCE_IMAGE=1 the CPU renders both references again (while the CPU path
+     * tracer exists). Do it only when a change is meant to alter the render.
+     */
+    @Test
+    fun `references can be rendered again on request`() {
+        assumeTrue(System.getenv("UPDATE_REFERENCE_IMAGE") == "1", "set UPDATE_REFERENCE_IMAGE=1 to rewrite the references")
+        store(GOLDEN, render(CpuRenderer(), SEED))
+        store(OTHER_SEED_REFERENCE, render(CpuRenderer(), OTHER_SEED))
+    }
+
+    private fun camera() = Camera().apply {
+        aspectRatio = 16.0f / 9.0f
+        imageWidth = 300
+        samplesPerPixel = 50
+        maxReflectionDepth = 45
+        vfov = 20.0f
+        lookFrom = Point(13.0f, 2.0f, 3.0f)
+        lookAt = Point(0.0f, 0.0f, 0.0f)
+        vUp = Vector(0.0f, 1.0f, 0.0f)
+        defocusAngle = 0.6f
+        focusDistance = 10.0f
+    }
+
+    private fun render(renderer: Renderer, seed: Long): PpmSupport.PpmImage {
         val world = prepareWorld()
         val tempFile = Files.createTempFile("raytracer-image-test", ".ppm")
-        RandomSource.withSeed(4242L)
+        RandomSource.withSeed(seed)
         return try {
-            // The golden image is the CPU reference: pinned seed, sequential sampling.
-            CpuRenderer().render(world, camera.initialize(), tempFile)
-            val bytes = Files.readAllBytes(tempFile)
-            maybeUpdateReference(bytes)
-            PpmSupport.parse(bytes)
+            renderer.render(world, camera().initialize(), tempFile)
+            PpmSupport.parse(Files.readAllBytes(tempFile))
         } finally {
             Files.deleteIfExists(tempFile)
             Files.deleteIfExists(PpmWriter.pngPath(tempFile))
+            Files.deleteIfExists(tempFile.resolveSibling(tempFile.fileName.toString().removeSuffix(".ppm") + "-denoised.ppm"))
             RandomSource.reset()
         }
     }
 
-    private fun loadReferenceImage(): ByteArray =
-        GZIPInputStream(
-            requireNotNull(javaClass.getResourceAsStream("/reference-image.ppm.gz")) {
-                "Missing reference image resource"
-            }
-        ).use { it.readBytes() }
+    private fun loadReference(name: String): ByteArray =
+        GZIPInputStream(requireNotNull(javaClass.getResourceAsStream("/$name")) { "Missing reference image $name" })
+            .use { it.readBytes() }
 
-    private fun maybeUpdateReference(bytes: ByteArray) {
-        if (System.getenv("UPDATE_REFERENCE_IMAGE") == "1") {
-            val target = Paths.get("src/test/resources/reference-image.ppm.gz")
-            Files.newOutputStream(target).use { fileStream ->
-                GZIPOutputStream(fileStream).use { it.write(bytes) }
-            }
+    private fun store(name: String, image: PpmSupport.PpmImage) {
+        Files.newOutputStream(Paths.get("src/test/resources/$name")).use { out ->
+            GZIPOutputStream(out).use { it.write(PpmSupport.encode(image)) }
         }
     }
 
     companion object {
-        private const val MEAN_ABS_DIFF_THRESHOLD = 0.0f
+        private const val GOLDEN = "reference-image.ppm.gz"
+        private const val OTHER_SEED_REFERENCE = "reference-image-seed1337.ppm.gz"
+        private const val SEED = 4242L
+        private const val OTHER_SEED = 1337L
         private const val HIGH_DIFF_THRESHOLD = 55
-        private const val MAX_HIGH_DIFF_CHANNELS = 0
+        /** Headroom over the CPU-to-CPU noise floor, for float differences between devices. */
+        private const val NOISE_TOLERANCE = 1.5f
+        private const val MIN_HIGH_DIFF_CHANNELS = 8
     }
 }

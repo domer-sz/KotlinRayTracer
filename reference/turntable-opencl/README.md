@@ -33,6 +33,20 @@ denoiser guides, denoised by OIDN's RT filter.
 Time: 3.48 s a frame, 26 min in all (tracing ~2.7 s, guides ~0.07 s, scene rebuild ~0.4 s;
 denoising overlapped with the next frame).
 
+## Raw stills
+
+`still-64spp-seed1.png` and `still-64spp-seed2.png`: frame 0 as a still, 64 spp, not denoised and
+never compressed (the PNG a render writes beside its PPM - the same pixels), seeds 1 and 2:
+
+```
+mvn -q -o exec:java -Drt.scene=studio-model -Drt.model=<yennefer stl> -Drt.renderer=gpu \
+  -Drt.seed=1 -Drt.denoise=off -Drt.out=still-64spp-seed1.ppm
+```
+
+Between the two seeds: PSNR 27.93 dB, SSIM 0.847 (ffmpeg `psnr` / `ssim`). That is the noise
+floor: another backend's still with any seed should sit about as far from either of them.
+Tracing took 2.56-2.57 s each.
+
 ## Comparing
 
 Frames carry the per-frame noise, so compare statistically (PSNR/SSIM, mean colour), never byte
