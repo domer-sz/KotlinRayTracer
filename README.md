@@ -6,8 +6,8 @@ i interaktywnym oknem podglądu.
 
 ## Wymagania
 
-- **Windows x64** (biblioteki odszumiacza i okno trzymające zegary GPU są przygotowane pod Windows;
-  sam render działa też na Linuksie).
+- **Windows x64** – biblioteki odszumiacza, kompilator kernela (NVRTC) i okno trzymające zegary GPU
+  są przygotowane tylko pod Windows.
 - **Karta NVIDIA z CUDA** – testowane na GTX 1070 (Pascal, sm_61) ze sterownikiem 577. Kompilator
   kernela (NVRTC) jest w `native/cuda`, więc CUDA Toolkit nie jest potrzebny. Bez karty NVIDIA renderer
   nie działa (nie ma już trybu CPU ani OpenCL).
