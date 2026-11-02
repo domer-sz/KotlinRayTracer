@@ -36,6 +36,12 @@ import java.nio.file.Path
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JFileChooser
@@ -124,6 +130,10 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     @Volatile private var dragging = false
     @Volatile private var running = true
     @Volatile private var saveRequested = false
+    // OIDN runs on the CPU, so it can work while the GPU keeps sampling; and turning the buffer
+    // into a picture needs no GPU either. One thread each, so their results come in order.
+    private val denoiseExecutor = Executors.newSingleThreadExecutor { Thread(it, "viewer-denoise").apply { isDaemon = true } }
+    private val displayExecutor = Executors.newSingleThreadExecutor { Thread(it, "viewer-display").apply { isDaemon = true } }
 
     /** Models added in this window; editing one bumps [sceneVersion] so the GPU copy is rebuilt. */
     val objects = CopyOnWriteArrayList<PlacedObject>()
@@ -548,7 +558,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         var capacity = 0
         try {
             GpuRenderer.requestedDenoiser().use { denoiser ->
-                loop(denoiser) { pixels ->
+                val open = { pixels: Int ->
                     val start = System.nanoTime()
                     val buffers = SceneFlattener.flatten(buildWorld(), activeLights())
                     val flattened = System.nanoTime()
@@ -566,6 +576,12 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                     }
                     System.err.println("[viewer] scene rebuilt: flatten ${(flattened - start) / 1_000_000} ms, upload ${(System.nanoTime() - flattened) / 1_000_000} ms")
                     next
+                }
+                try {
+                    loop(denoiser, open)
+                } finally {
+                    // Before the denoiser's library is freed, whatever it is still running ends.
+                    stopBackground()
                 }
             }
         } catch (t: Throwable) {
@@ -598,8 +614,19 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         var rateSamples = 0L
         var rateStart = System.nanoTime()
         var kernelNs = 0L
-        var denoiseNs = 0L
+        // Time spent denoising, on the denoise thread and in the hand-over to it.
+        val denoiseNs = AtomicLong()
         var finishedSeconds = 0.0
+        // The denoiser runs beside the sampling: it takes a snapshot and the GPU carries on.
+        // A result belongs to the accumulation it was made from (epoch) and is dropped otherwise.
+        var epoch = 0
+        var pendingDenoise: Future<FloatArray>? = null
+        var pendingEpoch = 0
+        // Turning the buffer into a picture also happens off the render thread, one at a time.
+        var displayPixels = FloatArray(0)
+        val displayBusy = AtomicBoolean(false)
+        var displayIntervalNs = DISPLAY_INTERVAL_NS
+        var lastShownState: List<Any?>? = null
 
         while (running) {
             val size = resolution
@@ -676,6 +703,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                 setup = setup(current, size)
                 session.setCamera(setup)
                 pixels = FloatArray(setup.totalPixels * 3)
+                displayPixels = FloatArray(setup.totalPixels * 3)
                 accumulated = current
                 accumulatedSize = size
                 accumulatedRaytrace = true
@@ -685,10 +713,12 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                 guides = null
                 denoised = null
                 finalDenoiseDone = false
+                epoch++
+                lastShownState = null
                 rateSamples = 0
                 rateStart = System.nanoTime()
                 kernelNs = 0L
-                denoiseNs = 0L
+                denoiseNs.set(0L)
             }
             val s = setup!!
             val target = targetSamples
@@ -710,55 +740,122 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                     System.err.printf(
                         "[viewer] %d spp at %dx%d: %.1f s, of it kernel %.1f s (%.1f M samples/s), denoising %.1f s%n",
                         samples, s.imageWidth, s.imageHeight, wall, kernelNs / 1e9,
-                        rateSamples / (kernelNs / 1e9) / 1e6, denoiseNs / 1e9
+                        rateSamples / (kernelNs / 1e9) / 1e6, denoiseNs.get() / 1e9
                     )
                 }
             }
             val done = samples >= target
 
+            // A finished denoise replaces the picture, unless the view changed since it began.
+            pendingDenoise?.takeIf { it.isDone }?.let { finished ->
+                pendingDenoise = null
+                if (pendingEpoch == epoch) {
+                    try {
+                        denoised = finished.get()
+                    } catch (t: Exception) {
+                        System.err.println("[viewer] denoising failed: ${t.cause?.message ?: t.message}")
+                    }
+                }
+            }
+
             val now = System.nanoTime()
-            val denoiseNow = denoiser != null && denoiseOn &&
+            val denoiseNow = denoiser != null && denoiseOn && pendingDenoise == null &&
                 ((samples >= nextDenoise && !done) || (done && !finalDenoiseDone))
             if (denoiseNow) {
-                val denoiseStart = System.nanoTime()
+                val handOverStart = System.nanoTime()
                 session.read(GpuSession.IMAGE, pixels)
                 val guidePair = guides ?: renderGuides(session, s).also { guides = it }
                 val average = FloatArray(pixels.size) { pixels[it] / samples }
-                denoised = denoiser!!.denoise(s.imageWidth, s.imageHeight, average, guidePair.first, guidePair.second)
+                val width = s.imageWidth
+                val height = s.imageHeight
+                pendingEpoch = epoch
+                pendingDenoise = denoiseExecutor.submit(Callable {
+                    val start = System.nanoTime()
+                    try {
+                        denoiser!!.denoise(width, height, average, guidePair.first, guidePair.second)
+                    } finally {
+                        denoiseNs.addAndGet(System.nanoTime() - start)
+                    }
+                })
                 while (nextDenoise <= samples) nextDenoise *= 4
                 if (done) finalDenoiseDone = true
-                lastShown = 0
-                denoiseNs += System.nanoTime() - denoiseStart
+                denoiseNs.addAndGet(System.nanoTime() - handOverStart)
             }
-            if (now - lastShown > DISPLAY_INTERVAL_NS || saveRequested) {
+            val cleanShown = denoiseOn && denoised != null
+            // Once the picture is final there is nothing new to draw until something changes.
+            val state = listOf(samples, if (cleanShown) System.identityHashCode(denoised) else 0, denoiseOn, pendingDenoise != null)
+            val changed = !(done && state == lastShownState)
+            if (saveRequested) {
                 session.read(GpuSession.IMAGE, pixels)
-                // The GPU's own speed: samples over the time spent in their launches. Wall time
-                // would count the denoiser's pauses too, which early on outlast the sampling.
-                val rate = if (kernelNs > 0) rateSamples / (kernelNs / 1e9) / 1e6 else 0.0
-                val cleanShown = denoiseOn && denoised != null
-                val image = if (cleanShown) toImage(denoised!!, s.imageWidth, s.imageHeight, 1.0f)
-                else toImage(pixels, s.imageWidth, s.imageHeight, 1.0f / samples)
-                val denoiseNote = when {
-                    denoiser == null -> "bez odszumiania (brak OIDN)"
-                    !denoiseOn -> "odszumianie wył."
-                    cleanShown && done -> "odszumione, gotowe"
-                    cleanShown -> "odszumione"
-                    else -> "odszumię przy ${minOf(nextDenoise, target)} spp"
-                }
-                val speed = if (done) " · %.1f s".format(finishedSeconds) else " · %.1f M próbek/s".format(rate)
-                show(image, "${s.imageWidth}×${s.imageHeight} · $samples / $target spp$speed · $denoiseNote")
-                SwingUtilities.invokeLater { if (::controls.isInitialized) controls.showProgress(samples, target) }
+                showNow(s, pixels, if (cleanShown) denoised else null, samples, target, done, finishedSeconds,
+                    rateSamples, kernelNs, denoiser != null, nextDenoise)
+                lastShownState = state
                 lastShown = now
-                if (saveRequested) save(s, pixels, samples, if (cleanShown) denoised else null)
+                save(s, pixels, samples, if (cleanShown) denoised else null)
+            } else if (changed && now - lastShown > displayIntervalNs && displayBusy.compareAndSet(false, true)) {
+                val readStart = System.nanoTime()
+                // The finished picture needs no read at all; a noisy one a single copy.
+                if (!cleanShown) session.read(GpuSession.IMAGE, displayPixels)
+                val readNs = System.nanoTime() - readStart
+                // Reading stalls the GPU: spread the reads out when they are slow.
+                displayIntervalNs = maxOf(DISPLAY_INTERVAL_NS, readNs * DISPLAY_READ_SHARE)
+                val noisy = displayPixels
+                val clean = if (cleanShown) denoised else null
+                val count = samples
+                val rate = rateSamples
+                val kernel = kernelNs
+                val seconds = finishedSeconds
+                val denoising = denoiser != null
+                val nextAt = nextDenoise
+                displayExecutor.execute {
+                    try {
+                        showNow(s, noisy, clean, count, target, done, seconds, rate, kernel, denoising, nextAt)
+                    } finally {
+                        displayBusy.set(false)
+                    }
+                }
+                lastShownState = state
+                lastShown = now
             }
             if (done) Thread.sleep(FRAME_MS)
         }
     }
 
+    /** Turns the accumulated picture into an image and puts it in the window, with its status line. */
+    private fun showNow(
+        s: CameraSetup, noisy: FloatArray, clean: FloatArray?, samples: Int, target: Int, done: Boolean,
+        finishedSeconds: Double, rateSamples: Long, kernelNs: Long, hasDenoiser: Boolean, nextDenoise: Int
+    ) {
+        // The GPU's own speed: samples over the time spent in their launches. Wall time
+        // would count the denoiser's pauses too, which early on outlast the sampling.
+        val rate = if (kernelNs > 0) rateSamples / (kernelNs / 1e9) / 1e6 else 0.0
+        val image = if (clean != null) toImage(clean, s.imageWidth, s.imageHeight, 1.0f)
+        else toImage(noisy, s.imageWidth, s.imageHeight, 1.0f / samples)
+        val denoiseNote = when {
+            !hasDenoiser -> "bez odszumiania (brak OIDN)"
+            !denoiseOn -> "odszumianie wył."
+            clean != null && done -> "odszumione, gotowe"
+            clean != null -> "odszumione"
+            else -> "odszumię przy ${minOf(nextDenoise, target)} spp"
+        }
+        val speed = if (done) " · %.1f s".format(finishedSeconds) else " · %.1f M próbek/s".format(rate)
+        show(image, "${s.imageWidth}×${s.imageHeight} · $samples / $target spp$speed · $denoiseNote")
+        SwingUtilities.invokeLater { if (::controls.isInitialized) controls.showProgress(samples, target) }
+    }
+
+    /** Lets the denoise and display threads finish: the denoiser's library must not be freed under them. */
+    private fun stopBackground() {
+        denoiseExecutor.shutdown()
+        denoiseExecutor.awaitTermination(60, TimeUnit.SECONDS)
+        displayExecutor.shutdown()
+        displayExecutor.awaitTermination(5, TimeUnit.SECONDS)
+    }
+
     /** The denoiser's albedo and normal guides for the current view, averaged over a few samples. */
     private fun renderGuides(session: GpuSession, setup: CameraSetup): Pair<FloatArray, FloatArray> {
         fun guide(mode: Int): FloatArray {
-            session.launch(mode, setup, 0, GUIDE_SAMPLES, 1.0f / GUIDE_SAMPLES, GpuSession.GUIDE)
+            // In slices, so a heavy scene at a large size never holds the GPU past the watchdog.
+            session.traceSliced(mode, setup, GUIDE_SAMPLES, GpuSession.GUIDE)
             return FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.GUIDE, it) }
         }
         return guide(GpuSession.MODE_ALBEDO) to guide(GpuSession.MODE_NORMAL)
@@ -1204,6 +1301,8 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         private const val FRAME_MS = 16L
         private const val LAUNCH_MS = 40.0
         private const val DISPLAY_INTERVAL_NS = 100_000_000L
+        /** A read of the picture may cost the GPU at most 1 / this of the time between two of them. */
+        private const val DISPLAY_READ_SHARE = 8L
         private const val DEFAULT_TARGET = 1024
         private const val FIRST_DENOISE = 16
         /** Rays per pixel the quick look gathers once the view holds still, for smooth edges. */
