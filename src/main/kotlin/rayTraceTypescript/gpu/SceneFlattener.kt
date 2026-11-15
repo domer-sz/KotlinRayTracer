@@ -1,6 +1,7 @@
 package rayTraceTypescript.gpu
 
 import rayTraceTypescript.Point
+import rayTraceTypescript.Vector
 import rayTraceTypescript.materials.Material
 import rayTraceTypescript.objects.BvhNode
 import rayTraceTypescript.objects.Hittable
@@ -27,6 +28,9 @@ class SceneFlattener private constructor() {
     private val sphereMaterials = IntBuffer()
     private val triangles = FloatBuffer()
     private val triangleMaterials = IntBuffer()
+    /** 9 floats a triangle: its corners' normals for smooth shading, zeros for a flat facet. */
+    private val triangleNormals = FloatBuffer()
+    private var anySmooth = false
     private val quads = FloatBuffer()
     private val quadMaterials = IntBuffer()
     private val mediumInts = IntBuffer()
@@ -59,7 +63,7 @@ class SceneFlattener private constructor() {
         require(bvh.maxDepth <= SceneBuffers.MAX_TRAVERSAL_DEPTH) {
             "Scene tree is ${bvh.maxDepth} levels deep, kernel stack holds ${SceneBuffers.MAX_TRAVERSAL_DEPTH}"
         }
-        val (orderedTriangles, orderedTriangleMaterials) = trianglesInLeafOrder()
+        val (orderedTriangles, orderedTriangleMaterials, orderedNormals) = trianglesInLeafOrder()
         return SceneBuffers(
             nodes = bvh.nodes.toArray(),
             leaves = bvh.leaves.toArray(),
@@ -68,6 +72,7 @@ class SceneFlattener private constructor() {
             sphereMaterials = sphereMaterials.toArray(),
             triangles = orderedTriangles,
             triangleMaterials = orderedTriangleMaterials,
+            triangleNormals = orderedNormals,
             quads = quads.toArray(),
             quadMaterials = quadMaterials.toArray(),
             mediumInts = mediumInts.toArray(),
@@ -106,6 +111,7 @@ class SceneFlattener private constructor() {
                 val index = triangleMaterials.size
                 triangles.addTriangle(triangle)
                 triangleMaterials.add(registerMaterial(triangle.material))
+                addCornerNormals(hittable.cornerNormals, transform)
                 val box = triangle.aabbBoundingBox()
                 refs.add(SceneBuffers.LEAF_TRIANGLE, index, box.x.min, box.y.min, box.z.min, box.x.max, box.y.max, box.z.max)
             }
@@ -162,6 +168,21 @@ class SceneFlattener private constructor() {
                 triangles.add(0.0f)
             }
             triangleMaterials.add(if (paletteIds != null) paletteIds.getOrElse(faces!![t]) { material } else material)
+        }
+        // The corners' normals turn with the mesh; its scale and offset leave a direction alone.
+        val normals = block.cornerNormals
+        if (normals == null) {
+            repeat(block.triangleCount * 9) { triangleNormals.add(0.0f) }
+        } else {
+            anySmooth = true
+            for (corner in 0 until block.triangleCount * 3) {
+                val x = normals[corner * 3]
+                val y = normals[corner * 3 + 1]
+                val z = normals[corner * 3 + 2]
+                triangleNormals.add(c * x + s * z)
+                triangleNormals.add(y)
+                triangleNormals.add(-s * x + c * z)
+            }
         }
         val root = bvh.graft(placed, base)
         // Its box is what its root's two children cover, so the tree above holds them whole.
@@ -226,12 +247,15 @@ class SceneFlattener private constructor() {
      * Rewrites the triangle buffer in the order the leaves reference it, so the facets of one
      * leaf - and of neighbouring leaves - sit next to each other in memory.
      */
-    private fun trianglesInLeafOrder(): Pair<FloatArray, IntArray> {
+    private fun trianglesInLeafOrder(): Triple<FloatArray, IntArray, FloatArray> {
         val source = triangles.toArray()
         val sourceMaterials = triangleMaterials.toArray()
+        // A scene without a smooth mesh carries no normals at all: the kernel then has no use for them.
+        val sourceNormals = if (anySmooth) triangleNormals.toArray() else null
         val remap = IntArray(sourceMaterials.size) { -1 }
         val ordered = FloatArray(source.size)
         val orderedMaterials = IntArray(sourceMaterials.size)
+        val orderedNormals = FloatArray(sourceNormals?.size ?: 0)
         var next = 0
         val refs = bvh.refs
         for (i in 0 until refs.size step 2) {
@@ -241,11 +265,28 @@ class SceneFlattener private constructor() {
                 remap[old] = next
                 System.arraycopy(source, old * SceneBuffers.TRIANGLE_STRIDE, ordered, next * SceneBuffers.TRIANGLE_STRIDE, SceneBuffers.TRIANGLE_STRIDE)
                 orderedMaterials[next] = sourceMaterials[old]
+                if (sourceNormals != null) System.arraycopy(sourceNormals, old * 9, orderedNormals, next * 9, 9)
                 next++
             }
             refs[i + 1] = remap[old]
         }
-        return ordered to orderedMaterials
+        return Triple(ordered, orderedMaterials, orderedNormals)
+    }
+
+    /** A triangle's corner normals turned as [transform] turns it, or zeros for a flat facet. */
+    private fun addCornerNormals(normals: FloatArray?, transform: Transform) {
+        if (normals == null) {
+            repeat(9) { triangleNormals.add(0.0f) }
+            return
+        }
+        anySmooth = true
+        for (corner in 0 until 3) {
+            val n = Vector(normals[corner * 3], normals[corner * 3 + 1], normals[corner * 3 + 2])
+            val turned = if (transform === Transform.IDENTITY) n else transform.vector(n)
+            triangleNormals.add(turned.x)
+            triangleNormals.add(turned.y)
+            triangleNormals.add(turned.z)
+        }
     }
 
     /** Writes a quad's geometry and returns its index; the caller decides where it is referenced. */

@@ -1052,6 +1052,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             focusDistance = if (base.defocusAngle > 0f) view.radius.toFloat() else base.focusDistance
             background = base.background
             lights = base.lights
+            fireflyClamp = base.fireflyClamp
         }
         return camera.initialize()
     }

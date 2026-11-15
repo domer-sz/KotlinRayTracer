@@ -86,6 +86,9 @@ __device__ inline float3 xyz(float4 a) { return make_float3(a.x, a.y, a.z); }
 #ifndef HAS_LIGHTS
 #define HAS_LIGHTS 1
 #endif
+#ifndef HAS_SMOOTH
+#define HAS_SMOOTH 1
+#endif
 #ifndef TEX_CHECKER
 #define TEX_CHECKER 1
 #endif
@@ -217,7 +220,8 @@ __device__ inline bool near_zero(float3 v) {
 
 typedef struct {
     float3 point;
-    float3 normal;
+    float3 normal;                       // the shading normal, against the ray
+    float3 gnormal;                      // the surface's own normal, against the ray: what is in front and behind
     float t;
     float u;
     float v;
@@ -240,6 +244,7 @@ typedef struct {
     const int* __restrict__ quadMaterials;
     const int* __restrict__ mediumInts;
     const float* __restrict__ mediumFloats;
+    const float* __restrict__ triangleNormals; // 9 per triangle: its corners' normals, zeros when flat
 } Scene;
 
 // The closest hit found so far. Only what the search itself needs: normals, points and texture
@@ -263,6 +268,7 @@ typedef struct {
 struct Instance {
     const float* vertices;
     const int* faces;                    // each triangle's entry in the mesh's own palette, or null
+    const float* normals;                // 9 per triangle, its corners' normals in the mesh's space; null when flat
     int material;                        // the material of the mesh, and of a face not in the palette
     int palette;                         // where this instance's entries start in Params.palette
     int paletteCount;
@@ -295,6 +301,7 @@ struct Params {
     const unsigned char* images;
     const float* perlinVectors;
     const int* perlinPermutations;
+    const float* triangleNormals;        // the loose triangles' corner normals, as the CUDA kernel's argument
     float* out;
     const int* quadIds;                  // the quad each pair of triangles in the tree stands for
     const Instance* instances;
@@ -310,6 +317,7 @@ struct Params {
     int rootNode;
     int lightCount;
     int quadInput;                       // which input of the tree of loose surfaces holds the quads; -1 without any
+    float fireflyClamp;                  // the brightest a sample may be; 0 for no limit
 };
 
 extern "C" {
@@ -541,6 +549,16 @@ __device__ inline void sphere_uv(float3 outwardNormal, HitRecord* rec) {
     rec->v = theta / M_PI_F;
 }
 
+// The shading normal across a smooth facet: its corners' normals [n] (9 floats) blended by the
+// hit's barycentric coordinates. It is only taken when it leans the same way as the facet
+// itself, [outward]; otherwise - and for a flat facet, whose corners are zeros - the facet's own.
+__device__ inline float3 smooth_normal(const float* n, float u, float v, float3 outward) {
+    float w = 1.0f - u - v;
+    float3 s = make_float3(n[0], n[1], n[2]) * w + make_float3(n[3], n[4], n[5]) * u + make_float3(n[6], n[7], n[8]) * v;
+    float ls = length(s);
+    return (ls > 1e-6f && dot(s, outward) > 0.0f) ? s / ls : outward;
+}
+
 // Everything shading needs about the winning hit, computed once.
 __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 origin, float3 direction,
                        float time, HitRecord* rec) {
@@ -549,6 +567,7 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
     rec->u = best->u;
     rec->v = best->v;
     float3 outwardNormal;
+    float3 shading;
 
     if (HAS_SPHERES && best->kind == LEAF_SPHERE) {
         const float* s = sc->spheres + best->index * 8;
@@ -557,26 +576,32 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
         outwardNormal = (rec->point - center) / s[6];
         sphere_uv(outwardNormal, rec);
         rec->material = sc->sphereMaterials[best->index];
+        shading = outwardNormal;
     } else if (HAS_TRIANGLES && best->kind == LEAF_TRIANGLE) {
         const float4* t = sc->triangles + best->index * 3;
         outwardNormal = cross(xyz(t[1]), xyz(t[2]));
         outwardNormal = outwardNormal / length(outwardNormal);
         rec->material = sc->triangleMaterials[best->index];
+        shading = HAS_SMOOTH ? smooth_normal(sc->triangleNormals + best->index * 9, best->u, best->v, outwardNormal) : outwardNormal;
     } else if (HAS_QUADS && best->kind == LEAF_QUAD) {
         const float* data = sc->quads + best->index * 16;
         outwardNormal = make_float3(data[12], data[13], data[14]);
         rec->material = sc->quadMaterials[best->index];
+        shading = outwardNormal;
 #if RT_OPTIX
     } else if (best->kind == LEAF_MESH) {
         // The facet's normal from its winding, in the mesh's own space, then turned as the
-        // placement turns the mesh; its scale and offset leave a direction alone.
+        // placement turns the mesh; its scale and offset leave a direction alone. A smooth
+        // mesh's normal is blended in its own space and turned the same way.
         const Instance* placed = params.instances + best->instance;
         const float* v = placed->vertices + best->index * 9;
         float3 v0 = make_float3(v[0], v[1], v[2]);
-        float3 n = cross(make_float3(v[3], v[4], v[5]) - v0, make_float3(v[6], v[7], v[8]) - v0);
-        outwardNormal = make_float3(placed->cosTurn * n.x + placed->sinTurn * n.z, n.y,
-                                    -placed->sinTurn * n.x + placed->cosTurn * n.z);
-        outwardNormal = outwardNormal / length(outwardNormal);
+        float3 facet = cross(make_float3(v[3], v[4], v[5]) - v0, make_float3(v[6], v[7], v[8]) - v0);
+        facet = facet / length(facet);
+        float3 n = (HAS_SMOOTH && placed->normals) ? smooth_normal(placed->normals + best->index * 9, best->u, best->v, facet) : facet;
+        outwardNormal = make_float3(placed->cosTurn * facet.x + placed->sinTurn * facet.z, facet.y,
+                                    -placed->sinTurn * facet.x + placed->cosTurn * facet.z);
+        shading = make_float3(placed->cosTurn * n.x + placed->sinTurn * n.z, n.y, -placed->sinTurn * n.x + placed->cosTurn * n.z);
         rec->material = placed->material;
         if (placed->faces) {
             int entry = placed->faces[best->index];
@@ -586,14 +611,19 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
     } else {
         // Fog has no surface: the normal is arbitrary and the ray always counts as outside.
         rec->normal = make_float3(1.0f, 0.0f, 0.0f);
+        rec->gnormal = rec->normal;
         rec->frontFace = true;
         rec->material = sc->mediumInts[best->index * 2 + 1];
         rec->u = 0.0f;
         rec->v = 0.0f;
         return;
     }
+    // In front or behind is the surface's own business; the shading normal only shades.
     rec->frontFace = dot(direction, outwardNormal) < 0.0f;
-    rec->normal = rec->frontFace ? outwardNormal : -outwardNormal;
+    rec->gnormal = rec->frontFace ? outwardNormal : -outwardNormal;
+    rec->normal = rec->frontFace ? shading : -shading;
+    // A shading normal turned away from the viewer would shade the back of the facet.
+    if (dot(rec->normal, direction) > 0.0f) rec->normal = rec->gnormal;
 }
 
 #if RT_OPTIX
@@ -864,7 +894,9 @@ __device__ inline bool scatter(const int* matI, const float* matF,
         srec->attenuation = texture_value(texI, texF, images, perlinVectors, perlinPermutations,
                                           texture, rec->u, rec->v, rec->point);
         srec->direction = reflected + random_unit_vector(rng) * fuzz;
-        return true;
+        // A reflection under the surface itself - off a smooth normal, or fuzzed past the
+        // horizon - is absorbed, as in the book's Metal.
+        return dot(srec->direction, rec->gnormal) > 0.0f;
     }
 
     // Dielectric - the only material left, unless the scene has none.
@@ -1052,6 +1084,8 @@ extern "C" __global__ void __raygen__render() {
     const unsigned char* images = params.images;
     const float* perlinVectors = params.perlinVectors;
     const int* perlinPermutations = params.perlinPermutations;
+    const float* triangleNormals = params.triangleNormals;
+    const float fireflyClamp = params.fireflyClamp;
     float* out = params.out;
     const int width = params.width;
     const int height = params.height;
@@ -1089,6 +1123,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                      const unsigned char* __restrict__ images,
                      const float* __restrict__ perlinVectors,
                      const int* __restrict__ perlinPermutations,
+                     const float* __restrict__ triangleNormals,
                      float* out,
                      const int width,
                      const int height,
@@ -1098,7 +1133,8 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                      const float pixelSamplesScale,
                      const int rootNode,
                      const int lightCount,
-                     const unsigned long long seed) {
+                     const unsigned long long seed,
+                     const float fireflyClamp) {
     // Work items come in warps of 32, each covering an 8x4 tile of pixels.
     int gid = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     int tile = gid >> 5;
@@ -1122,6 +1158,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     scene.quadMaterials = quadMaterials;
     scene.mediumInts = mediumInts;
     scene.mediumFloats = mediumFloats;
+    scene.triangleNormals = triangleNormals;
 
     float3 cameraCenter = make_float3(cam[0], cam[1], cam[2]);
     float3 pixel00      = make_float3(cam[3], cam[4], cam[5]);
@@ -1246,6 +1283,10 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                 }
                 if (density < 1e-8f) {
                     done = true;
+                } else if (matI[rec.material * 2] != 4 && dot(chosen, rec.gnormal) <= 0.0f) {
+                    // A direction under the surface itself - which a smooth normal can lean into -
+                    // would leak light through it. (Fog scatters every way; it has no surface.)
+                    done = true;
                 } else {
                     // Weigh the sample by how much the surface actually scatters that way;
                     // that division is what keeps the estimate unbiased.
@@ -1279,7 +1320,15 @@ extern "C" __global__ void render(const float* __restrict__ cam,
 
         depth++;
         if (done || depth >= maxReflectionDepth) {
-            pixelColor += sampleColor;
+            // A firefly - a rare path far brighter than its share - is capped, not averaged in raw.
+            if (fireflyClamp > 0.0f) {
+                float brightest = fmaxf(sampleColor.x, fmaxf(sampleColor.y, sampleColor.z));
+                if (brightest > fireflyClamp) sampleColor *= fireflyClamp / brightest;
+            }
+            // One bad sample (NaN) would spoil the pixel for good; it is left out instead.
+            if (sampleColor.x == sampleColor.x && sampleColor.y == sampleColor.y && sampleColor.z == sampleColor.z) {
+                pixelColor += sampleColor;
+            }
             sample++;
             fresh = true;
         }

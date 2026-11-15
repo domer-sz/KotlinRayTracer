@@ -43,6 +43,8 @@ class ImageRegressionTest {
     }
 
     private fun camera() = Camera().apply {
+        // The stored reference lets every sample through.
+        fireflyClamp = 0f
         aspectRatio = 16.0f / 9.0f
         imageWidth = 300
         samplesPerPixel = 50

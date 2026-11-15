@@ -40,6 +40,8 @@ class MeshBlock(val mesh: Mesh) {
     internal val maxDepth: Int get() = tree.maxDepth
     /** Each triangle's entry in the mesh's palette, in leaf order; null when the file gave none. */
     internal val faceMaterials: IntArray? get() = tree.faceMaterials
+    /** The normals at each triangle's corners (9 floats a triangle), in leaf order; null for a flat mesh. */
+    internal val cornerNormals: FloatArray? get() = tree.cornerNormals
 
     /** The mesh's triangles and SAH tree as the CUDA kernel reads them. */
     private class Tree(mesh: Mesh) {
@@ -49,6 +51,7 @@ class MeshBlock(val mesh: Mesh) {
         val refs: IntArray
         val maxDepth: Int
         val faceMaterials: IntArray?
+        val cornerNormals: FloatArray?
 
         init {
             val triangleCount = mesh.triangleCount
@@ -79,15 +82,19 @@ class MeshBlock(val mesh: Mesh) {
             val treeRefs = builder.refs.toArray()
             val sourceMaterials = mesh.faceMaterials?.takeIf { mesh.hasColours }
             val orderedMaterials = sourceMaterials?.let { IntArray(it.size) }
+            val sourceNormals = if (mesh.smooth) mesh.smoothNormals else null
+            val orderedNormals = sourceNormals?.let { FloatArray(it.size) }
             for (i in treeRefs.indices step 2) {
                 val old = treeRefs[i + 1]
                 val next = i / 2
                 System.arraycopy(source, old * stride, ordered, next * stride, stride)
                 if (orderedMaterials != null) orderedMaterials[next] = sourceMaterials[old]
+                if (orderedNormals != null) System.arraycopy(sourceNormals, old * Mesh.VERTEX_FLOATS, orderedNormals, next * Mesh.VERTEX_FLOATS, Mesh.VERTEX_FLOATS)
                 treeRefs[i + 1] = next
             }
             triangles = ordered
             faceMaterials = orderedMaterials
+            cornerNormals = orderedNormals
             nodes = builder.nodes.toArray()
             leaves = builder.leaves.toArray()
             refs = treeRefs

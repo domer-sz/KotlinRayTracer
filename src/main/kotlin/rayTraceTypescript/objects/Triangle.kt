@@ -16,7 +16,14 @@ import kotlin.math.min
  * winding rather than from the file: STL normals are often wrong, and [Hit] flips it against
  * the ray anyway, which keeps meshes visible from both sides.
  */
-class Triangle(val v0: Point, val v1: Point, val v2: Point, val material: Material) : Hittable {
+class Triangle(
+    val v0: Point, val v1: Point, val v2: Point, val material: Material,
+    /**
+     * Normals at the three corners (9 floats) for smooth shading on the GPU ([Mesh.smoothNormals]),
+     * or null for a flat facet. Hits here keep the facet's own normal: they serve picking.
+     */
+    val cornerNormals: FloatArray? = null
+) : Hittable {
 
     val edge1: Vector = v1 - v0
     val edge2: Vector = v2 - v0

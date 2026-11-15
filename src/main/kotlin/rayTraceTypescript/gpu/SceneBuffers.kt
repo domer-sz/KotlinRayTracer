@@ -12,6 +12,8 @@ package rayTraceTypescript.gpu
  *  - [spheres]: 8 floats per sphere - center at t=0 (3), center movement (3), radius, unused
  *  - [triangles]: 12 floats per facet, in leaf order - first vertex, two edges, each padded to a
  *    float4
+ *  - [triangleNormals]: 9 floats per facet, in the same order - the normals at its three corners
+ *    for smooth shading, zeros for a flat facet; empty when no facet of the scene is smooth
  *  - [quads]: 16 floats - corner (3), the two edges (3 + 3), the basis vector w (3),
  *    the plane normal (3) and its offset
  *  - [materialInts]: 2 ints per material - type (0 Lambertian, 1 Metal, 2 Dielectric,
@@ -48,7 +50,8 @@ class SceneBuffers(
     val perlinVectors: FloatArray,
     val perlinPermutations: IntArray,
     val rootNode: Int,
-    val maxDepth: Int
+    val maxDepth: Int,
+    val triangleNormals: FloatArray = FloatArray(0)
 ) {
     val nodeCount: Int get() = nodes.size / NODE_INTS
     val sphereCount: Int get() = sphereMaterials.size
@@ -66,7 +69,7 @@ class SceneBuffers(
         val kinds = refs.filterIndexed { i, _ -> i % 2 == 0 }.toSet()
         return defines(
             LEAF_SPHERE in kinds, LEAF_TRIANGLE in kinds, LEAF_QUAD in kinds, LEAF_MEDIUM in kinds,
-            spheres, lightCount > 0, materialInts, textureInts
+            spheres, lightCount > 0, materialInts, textureInts, smooth = triangleNormals.isNotEmpty()
         )
     }
 
@@ -77,7 +80,8 @@ class SceneBuffers(
          */
         internal fun defines(
             spheres: Boolean, triangles: Boolean, quads: Boolean, media: Boolean,
-            sphereData: FloatArray, lights: Boolean, materialInts: IntArray, textureInts: IntArray
+            sphereData: FloatArray, lights: Boolean, materialInts: IntArray, textureInts: IntArray,
+            smooth: Boolean
         ): String {
             val materials = materialInts.filterIndexed { i, _ -> i % MATERIAL_INT_STRIDE == 0 }.toSet()
             val textures = textureInts.filterIndexed { i, _ -> i % TEXTURE_INT_STRIDE == 0 }.toSet()
@@ -91,6 +95,7 @@ class SceneBuffers(
                 "HAS_MEDIA" to media,
                 "HAS_MOTION" to moving,
                 "HAS_LIGHTS" to lights,
+                "HAS_SMOOTH" to smooth,
                 "TEX_CHECKER" to (1 in textures),
                 "TEX_IMAGE" to (2 in textures),
                 "TEX_NOISE" to (4 in textures),

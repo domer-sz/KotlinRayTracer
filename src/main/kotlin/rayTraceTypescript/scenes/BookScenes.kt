@@ -654,6 +654,9 @@ object BookScenes {
                 defocusAngle = 0.4f
                 focusDistance = 3.3883f
                 lights = HittableList(mutableListOf(key, fill, rim))
+                // StlViewer caps a sample at 16 before its exposure; here the exposure is in the
+                // lamps already, so the same cap is 16 times as much.
+                fireflyClamp = Camera.DEFAULT_FIREFLY_CLAMP * exposure
             },
             parts = listOf(ScenePart("Figura", figure))
         )

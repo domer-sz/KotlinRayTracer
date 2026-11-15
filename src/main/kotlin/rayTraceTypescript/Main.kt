@@ -41,6 +41,8 @@ fun main() {
     System.getProperty("rt.aspect")?.toFloatOrNull()?.let { scene.camera.aspectRatio = it }
     // -Drt.lights=off renders the same scene without aiming any samples at its lights.
     if (System.getProperty("rt.lights") == "off") scene.camera.lights = null
+    // -Drt.firefly=<brightest sample> caps fireflies differently; 0 or off lets every sample through.
+    System.getProperty("rt.firefly")?.let { scene.camera.fireflyClamp = if (it == "off") 0f else it.toFloatOrNull() ?: scene.camera.fireflyClamp }
     println("Scene: ${scene.name} (${scene.camera.imageWidth}px, ${scene.camera.samplesPerPixel} spp)")
 
     // -Drt.out redirects the render, so a quick look does not overwrite the committed image.ppm.

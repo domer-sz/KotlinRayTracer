@@ -31,6 +31,14 @@ class Camera {
     var lights: Hittable? = null
 
     /**
+     * The brightest a single sample may be (its largest channel), 0 for no limit. A rare path
+     * that finds a light through a run of mirrors brings back far more than its share and
+     * shows as a lone bright speck - a firefly; capped, it costs a little brightness where such
+     * paths gather. 16 is StlViewer's cap; -Drt.firefly changes it.
+     */
+    var fireflyClamp: Float = DEFAULT_FIREFLY_CLAMP
+
+    /**
      * Renders [world] into [outputPath] and returns the number of primary rays traced.
      * It renders on the GPU through CUDA ([rayTraceTypescript.gpu.GpuRenderer]); without a CUDA
      * device it fails with the reason rather than falling back to anything slower.
@@ -89,7 +97,12 @@ class Camera {
             background = background,
             lights = lights,
             defocusDiscU = u * defocusRadius,
-            defocusDiscV = v * defocusRadius
+            defocusDiscV = v * defocusRadius,
+            fireflyClamp = fireflyClamp
         )
+    }
+
+    companion object {
+        const val DEFAULT_FIREFLY_CLAMP = 16.0f
     }
 }

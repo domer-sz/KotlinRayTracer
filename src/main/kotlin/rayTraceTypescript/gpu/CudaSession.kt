@@ -88,7 +88,7 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
             // cuLaunchKernel takes a pointer to each argument's value, in the kernel's order:
             // the camera and the scene buffers, then the output and the launch's numbers.
             val pointers = sceneArguments + outputs[target]
-            val params = stack.mallocPointer(pointers.size + 9)
+            val params = stack.mallocPointer(pointers.size + 10)
             pointers.forEachIndexed { i, buffer -> params.put(i, MemoryUtil.memAddress(stack.longs(buffer))) }
             var at = pointers.size
             for (value in intArrayOf(setup.imageWidth, setup.imageHeight, sampleStart, count, setup.maxReflectionDepth)) {
@@ -97,7 +97,8 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
             params.put(at++, MemoryUtil.memAddress(stack.floats(scale)))
             params.put(at++, MemoryUtil.memAddress(stack.ints(scene.rootNode)))
             params.put(at++, MemoryUtil.memAddress(stack.ints(scene.lightCount)))
-            params.put(at, MemoryUtil.memAddress(stack.longs(seed)))
+            params.put(at++, MemoryUtil.memAddress(stack.longs(seed)))
+            params.put(at, MemoryUtil.memAddress(stack.floats(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f)))
 
             // One thread per pixel, a warp of 32 covering an 8x4 tile: neighbouring rays stay
             // together on their first bounces, where they diverge least.
@@ -181,7 +182,8 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         copy(s.materialInts), copy(s.materialFloats),
         copy(s.textureInts), copy(s.textureFloats),
         copy(s.textureImages),
-        copy(s.perlinVectors), copy(s.perlinPermutations)
+        copy(s.perlinVectors), copy(s.perlinPermutations),
+        copy(s.triangleNormals)
     )
 
     private fun allocate(bytes: Long): Long = MemoryStack.stackPush().use { stack ->

@@ -61,7 +61,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
     private var outputs: List<Long> = emptyList()
 
     /** A placed mesh on this card: its triangles as loaded, its faces' palette entries, and its tree. */
-    private class BlockOnCard(val vertices: Long, val faces: Long, val tree: OptixAccel.Tree)
+    private class BlockOnCard(val vertices: Long, val faces: Long, val normals: Long, val tree: OptixAccel.Tree)
     private val blocks = IdentityHashMap<MeshBlock, BlockOnCard>()
 
     private var scene: InstancedScene = initial.instanced
@@ -126,6 +126,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // The root node is the CUDA kernel's: OptiX searches its own trees.
         paramsHost.putInt(setup.imageWidth).putInt(setup.imageHeight).putInt(sampleStart).putInt(count)
             .putInt(setup.maxReflectionDepth).putFloat(scale).putInt(0).putInt(scene.lightCount).putInt(quadInput)
+            .putFloat(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f)
         check(paramsHost.position() == PARAMS_BYTES - PARAMS_PADDING) { "Params is ${paramsHost.position()} bytes, the kernel expects ${PARAMS_BYTES - PARAMS_PADDING}" }
         DeviceMemory.write(paramsBuffer, paramsHost)
 
@@ -203,7 +204,8 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             keep(DeviceMemory.upload(s.materialInts)), keep(DeviceMemory.upload(s.materialFloats)),
             keep(DeviceMemory.upload(s.textureInts)), keep(DeviceMemory.upload(s.textureFloats)),
             keep(DeviceMemory.upload(s.textureImages)),
-            keep(DeviceMemory.upload(s.perlinVectors)), keep(DeviceMemory.upload(s.perlinPermutations))
+            keep(DeviceMemory.upload(s.perlinVectors)), keep(DeviceMemory.upload(s.perlinPermutations)),
+            keep(DeviceMemory.upload(s.triangleNormals))
         )
 
         // The loose surfaces: the scene's own triangles - as the kernel keeps them, first vertex
@@ -242,7 +244,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             s.instances.forEach { instance ->
                 val onCard = blocks.getValue(instance.block)
                 val own = instance.palette ?: IntArray(0)
-                table.putLong(onCard.vertices).putLong(if (own.isEmpty()) 0L else onCard.faces)
+                table.putLong(onCard.vertices).putLong(if (own.isEmpty()) 0L else onCard.faces).putLong(onCard.normals)
                     .putInt(instance.material).putInt(paletteEntries.size).putInt(own.size)
                     .putFloat(instance.cos).putFloat(instance.sin).putInt(0)
                 own.forEach { paletteEntries += it }
@@ -290,17 +292,21 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // The mesh's own order, not the CUDA kernel's leaf order: OptiX numbers the triangles as given.
         val vertices = DeviceMemory.upload(mesh.vertices)
         var faces = 0L
+        var normals = 0L
         try {
             faces = mesh.faceMaterials?.takeIf { mesh.hasColours }?.let { DeviceMemory.upload(it) } ?: 0L
+            // A smooth mesh's corner normals, in the same order and in its own space.
+            normals = if (mesh.smooth) DeviceMemory.upload(mesh.smoothNormals) else 0L
             val tree = accel.trianglesOnCard(listOf(vertices to block.triangleCount))
             System.err.println(
                 "[gpu] built the tree of a ${block.triangleCount}-triangle mesh on ${cuda.deviceName} (OptiX) in " +
-                    "${(System.nanoTime() - start) / 1_000_000} ms, ${tree.bytes / (1 shl 20)} MB"
+                    "${(System.nanoTime() - start) / 1_000_000} ms, ${tree.bytes / (1 shl 20)} MB" + if (mesh.smooth) ", shaded smooth" else ""
             )
-            return BlockOnCard(vertices, faces, tree)
+            return BlockOnCard(vertices, faces, normals, tree)
         } catch (t: Throwable) {
             DeviceMemory.free(vertices)
             DeviceMemory.free(faces)
+            DeviceMemory.free(normals)
             throw t
         }
     }
@@ -309,6 +315,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         DeviceMemory.free(block.tree.memory)
         DeviceMemory.free(block.vertices)
         DeviceMemory.free(block.faces)
+        DeviceMemory.free(block.normals)
     }
 
     private fun releaseScene() {
@@ -452,11 +459,11 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             else -> null
         }
 
-        /** The kernel's Params: 26 pointers and 64-bit numbers, 9 numbers of 32 bits, padded to a multiple of 8. */
-        private const val PARAMS_PADDING = 4
-        private const val PARAMS_BYTES = 26 * 8 + 9 * 4 + PARAMS_PADDING
-        /** The kernel's Instance: two pointers, then six numbers of 32 bits. */
-        private const val INSTANCE_BYTES = 2 * 8 + 6 * 4
+        /** The kernel's Params: 27 pointers and 64-bit numbers, then 10 numbers of 32 bits - a multiple of 8 as it is. */
+        private const val PARAMS_PADDING = 0
+        private const val PARAMS_BYTES = 27 * 8 + 10 * 4 + PARAMS_PADDING
+        /** The kernel's Instance: three pointers, then six numbers of 32 bits. */
+        private const val INSTANCE_BYTES = 3 * 8 + 6 * 4
         /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance. */
         private const val PAYLOAD_VALUES = 6
         private const val GROUPS = 4

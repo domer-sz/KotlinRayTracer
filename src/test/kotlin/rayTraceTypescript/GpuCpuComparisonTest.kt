@@ -220,6 +220,8 @@ open class GpuCpuComparisonTest {
     }
 
     private fun testCamera() = Camera().apply {
+        // The stored CPU renders let every sample through.
+        fireflyClamp = 0f
         aspectRatio = 16.0f / 9.0f
         imageWidth = 96
         samplesPerPixel = 64

@@ -73,7 +73,9 @@ class InstancedScene internal constructor(
     val instances: List<MeshInstance>,
     val boundaryNodes: IntArray,
     val boundaryLeaves: IntArray,
-    val boundaryRefs: IntArray
+    val boundaryRefs: IntArray,
+    /** The corners' normals of the [triangles], as [SceneBuffers.triangleNormals]; empty when none is smooth. */
+    val triangleNormals: FloatArray
 ) {
     val mediumCount: Int get() = mediumFloats.size
     val lightCount: Int get() = lights.size / 2
@@ -86,7 +88,8 @@ class InstancedScene internal constructor(
             triangles = sceneTriangles > 0 || instances.isNotEmpty() || SceneBuffers.LEAF_TRIANGLE in boundaries,
             quads = sceneQuads.isNotEmpty() || SceneBuffers.LEAF_QUAD in boundaries,
             media = mediumCount > 0,
-            sphereData = spheres, lights = lightCount > 0, materialInts = materialInts, textureInts = textureInts
+            sphereData = spheres, lights = lightCount > 0, materialInts = materialInts, textureInts = textureInts,
+            smooth = triangleNormals.isNotEmpty() || instances.any { it.block.mesh.smooth }
         )
     }
 
@@ -103,6 +106,8 @@ class InstancedScene internal constructor(
         private val quadMaterials = IntBuffer()
         private val triangles = FloatBuffer()
         private val triangleMaterials = IntBuffer()
+        private val triangleNormals = FloatBuffer()
+        private var anySmooth = false
         private val mediumInts = IntBuffer()
         private val mediumFloats = FloatBuffer()
         private val lights = IntBuffer()
@@ -142,7 +147,8 @@ class InstancedScene internal constructor(
                 instances = instances,
                 boundaryNodes = boundaries.nodes.toArray(),
                 boundaryLeaves = boundaries.leaves.toArray(),
-                boundaryRefs = boundaries.refs.toArray()
+                boundaryRefs = boundaries.refs.toArray(),
+                triangleNormals = if (anySmooth) triangleNormals.toArray() else FloatArray(0)
             )
         }
 
@@ -271,6 +277,20 @@ class InstancedScene internal constructor(
             val index = triangleMaterials.size
             triangles.addTriangle(triangle)
             triangleMaterials.add(materials.register(triangle.material))
+            // The corners' normals turn as the triangle does; zeros mark a flat facet.
+            val normals = original.cornerNormals
+            if (normals == null) {
+                repeat(9) { triangleNormals.add(0.0f) }
+            } else {
+                anySmooth = true
+                for (corner in 0 until 3) {
+                    val n = Vector(normals[corner * 3], normals[corner * 3 + 1], normals[corner * 3 + 2])
+                    val turned = if (transform === Transform.IDENTITY) n else transform.vector(n)
+                    triangleNormals.add(turned.x)
+                    triangleNormals.add(turned.y)
+                    triangleNormals.add(turned.z)
+                }
+            }
             return index to triangle
         }
     }

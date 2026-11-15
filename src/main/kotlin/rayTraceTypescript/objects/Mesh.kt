@@ -13,13 +13,19 @@ import rayTraceTypescript.materials.Material
  * model can sit anywhere and be any size. [standingOnFloor] is the default placement: it scales
  * the model to a workable height and puts it centred on the floor, where the scenes in this
  * project put their ground.
+ *
+ * A [smooth] mesh is shaded as the surface its facets approximate: the GPU turns the normal
+ * across each facet between [smoothNormals] at its corners. A model from a file is smooth
+ * ([MeshLoader]); a mesh made in code - a test's octahedron - keeps its flat facets.
  */
 class Mesh(
     val vertices: FloatArray,
     /** Each triangle's entry in [palette], when the file gave its faces materials. */
     val faceMaterials: IntArray? = null,
     /** The materials the file names (an OBJ's .mtl), in the order [faceMaterials] counts them. */
-    val palette: List<MeshMaterial> = emptyList()
+    val palette: List<MeshMaterial> = emptyList(),
+    /** Whether to shade it smooth, from [smoothNormals]. */
+    val smooth: Boolean = false
 ) {
 
     init {
@@ -32,6 +38,21 @@ class Mesh(
 
     /** Whether the file coloured its faces itself. */
     val hasColours: Boolean get() = faceMaterials != null && palette.isNotEmpty()
+
+    /** The same mesh, shaded smooth or flat. */
+    fun smoothed(on: Boolean = true): Mesh = if (on == smooth) this else Mesh(vertices, faceMaterials, palette, on)
+
+    /**
+     * A normal at each corner of each facet, 9 floats a triangle like [vertices], for smooth
+     * shading - worked out once, from the vertices as they are.
+     *
+     * A mesh file stores every facet on its own, so the corners have to be welded first. Corners
+     * one exporter wrote for one point are bit for bit the same, so they are matched on their
+     * float bits - no epsilon to tune - with -0 taken as +0. Each welded point's normal is the
+     * sum of its facets' unnormalised normals, so a bigger facet weighs more, made unit length.
+     * The same as StlViewer does it, so the two renderers shade a model alike.
+     */
+    val smoothNormals: FloatArray by lazy { weldedNormals(vertices) }
 
     fun bounds(): Aabb {
         var minX = Float.POSITIVE_INFINITY; var minY = Float.POSITIVE_INFINITY; var minZ = Float.POSITIVE_INFINITY
@@ -70,7 +91,7 @@ class Mesh(
             moved[i + 2] = (vertices[i + 2] - pivot.z) * scale + target.z
             i += 3
         }
-        return Mesh(moved, faceMaterials, palette)
+        return Mesh(moved, faceMaterials, palette, smooth)
     }
 
     /**
@@ -97,7 +118,7 @@ class Mesh(
             moved[i] = out[0]; moved[i + 1] = out[1]; moved[i + 2] = out[2]
             i += 3
         }
-        return Mesh(moved, faceMaterials, palette)
+        return Mesh(moved, faceMaterials, palette, smooth)
     }
 
     /** Every triangle made of [material]. */
@@ -114,17 +135,76 @@ class Mesh(
         return toHittables { index -> materials.getOrElse(faces[index]) { fallback } }
     }
 
-    private inline fun toHittables(materialOf: (Int) -> Material): List<Hittable> = (0 until triangleCount).map { index ->
-        val at = index * VERTEX_FLOATS
-        Triangle(
-            Point(vertices[at], vertices[at + 1], vertices[at + 2]),
-            Point(vertices[at + 3], vertices[at + 4], vertices[at + 5]),
-            Point(vertices[at + 6], vertices[at + 7], vertices[at + 8]),
-            materialOf(index)
-        )
+    private inline fun toHittables(materialOf: (Int) -> Material): List<Hittable> {
+        val normals = if (smooth) smoothNormals else null
+        return (0 until triangleCount).map { index ->
+            val at = index * VERTEX_FLOATS
+            Triangle(
+                Point(vertices[at], vertices[at + 1], vertices[at + 2]),
+                Point(vertices[at + 3], vertices[at + 4], vertices[at + 5]),
+                Point(vertices[at + 6], vertices[at + 7], vertices[at + 8]),
+                materialOf(index),
+                normals?.copyOfRange(at, at + VERTEX_FLOATS)
+            )
+        }
     }
 
     companion object {
+        /** See [smoothNormals]. */
+        internal fun weldedNormals(vertices: FloatArray): FloatArray {
+            val corners = vertices.size / 3
+            fun key(value: Float): Int = if (value == 0.0f) 0 else java.lang.Float.floatToRawIntBits(value)
+            // Open addressing over the corners' bits; each corner learns which corner stands for its point.
+            var capacity = 1
+            while (capacity < corners * 2) capacity = capacity shl 1
+            val mask = capacity - 1
+            val table = IntArray(capacity) { -1 }
+            val representative = IntArray(corners)
+            for (i in 0 until corners) {
+                val kx = key(vertices[i * 3]); val ky = key(vertices[i * 3 + 1]); val kz = key(vertices[i * 3 + 2])
+                var h = ((kx * -0x61c88647) xor (ky * -0x7a143595) xor (kz * -0x3d4d51cb)) and mask
+                while (true) {
+                    val slot = table[h]
+                    if (slot == -1) {
+                        table[h] = i
+                        representative[i] = i
+                        break
+                    }
+                    if (key(vertices[slot * 3]) == kx && key(vertices[slot * 3 + 1]) == ky && key(vertices[slot * 3 + 2]) == kz) {
+                        representative[i] = slot
+                        break
+                    }
+                    h = (h + 1) and mask
+                }
+            }
+            // Each facet's unnormalised normal, added to its three points: bigger facets weigh more.
+            val sums = FloatArray(corners * 3)
+            for (corner in 0 until corners step 3) {
+                val a = corner * 3
+                val e1x = vertices[a + 3] - vertices[a]; val e1y = vertices[a + 4] - vertices[a + 1]; val e1z = vertices[a + 5] - vertices[a + 2]
+                val e2x = vertices[a + 6] - vertices[a]; val e2y = vertices[a + 7] - vertices[a + 1]; val e2z = vertices[a + 8] - vertices[a + 2]
+                val nx = e1y * e2z - e1z * e2y
+                val ny = e1z * e2x - e1x * e2z
+                val nz = e1x * e2y - e1y * e2x
+                for (k in 0 until 3) {
+                    val r = representative[corner + k] * 3
+                    sums[r] += nx; sums[r + 1] += ny; sums[r + 2] += nz
+                }
+            }
+            val normals = FloatArray(corners * 3)
+            for (i in 0 until corners) {
+                val r = representative[i] * 3
+                val x = sums[r]; val y = sums[r + 1]; val z = sums[r + 2]
+                val length = kotlin.math.sqrt(x * x + y * y + z * z)
+                if (length > 0.0f) {
+                    normals[i * 3] = x / length; normals[i * 3 + 1] = y / length; normals[i * 3 + 2] = z / length
+                } else {
+                    normals[i * 3 + 2] = 1.0f
+                }
+            }
+            return normals
+        }
+
         /** Height a loaded model is scaled to, in scene units - roughly the big spheres' size. */
         const val DEFAULT_TARGET_HEIGHT = 2.0f
 
