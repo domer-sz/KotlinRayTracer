@@ -8,6 +8,7 @@ import org.lwjgl.cuda.CU.cuDeviceGet
 import org.lwjgl.cuda.CU.cuDeviceGetAttribute
 import org.lwjgl.cuda.CU.cuDeviceGetCount
 import org.lwjgl.cuda.CU.cuDeviceGetName
+import org.lwjgl.cuda.CU.cuDeviceTotalMem
 import org.lwjgl.cuda.CU.cuDevicePrimaryCtxRelease
 import org.lwjgl.cuda.CU.cuDevicePrimaryCtxRetain
 import org.lwjgl.cuda.CU.cuGetErrorString
@@ -181,29 +182,49 @@ class CudaContext private constructor(
 
         @Volatile private var initialised = false
 
-        /** A context on the first device whose name holds [filter]; on the first device without one. */
-        fun create(filter: String? = System.getenv(DEVICE_FILTER_ENV) ?: System.getenv("RT_OPENCL_DEVICE")): CudaContext {
+        /** The name filter RT_GPU_DEVICE gives (RT_OPENCL_DEVICE is still read), null without one. */
+        fun deviceFilter(): String? = (System.getenv(DEVICE_FILTER_ENV) ?: System.getenv("RT_OPENCL_DEVICE"))?.takeIf { it.isNotBlank() }
+
+        /** Every CUDA device, in the driver's order - which puts the fastest first. */
+        fun devices(): List<GpuDevice> {
             initialise()
             MemoryStack.stackPush().use { stack ->
                 val count = stack.mallocInt(1)
                 check(cuDeviceGetCount(count), "cuDeviceGetCount")
-                if (count.get(0) == 0) throw CudaException("no CUDA device found")
                 val handle = stack.mallocInt(1)
-                val devices = (0 until count.get(0)).map { ordinal ->
-                    check(cuDeviceGet(handle, ordinal), "cuDeviceGet")
-                    handle.get(0) to deviceName(handle.get(0))
-                }
-                val (device, name) = devices.firstOrNull { filter.isNullOrBlank() || it.second.contains(filter, ignoreCase = true) }
-                    ?: throw CudaException("no CUDA device matches $DEVICE_FILTER_ENV=$filter (found ${devices.joinToString { it.second }})")
                 val value = stack.mallocInt(1)
-                check(cuDeviceGetAttribute(value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device), "cuDeviceGetAttribute")
-                val major = value.get(0)
-                check(cuDeviceGetAttribute(value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device), "cuDeviceGetAttribute")
-                val minor = value.get(0)
-                val context = stack.mallocPointer(1)
-                check(cuDevicePrimaryCtxRetain(context, device), "cuDevicePrimaryCtxRetain")
-                return CudaContext(device, context.get(0), name, major * 10 + minor).also { it.makeCurrent() }
+                val bytes = stack.mallocPointer(1)
+                return (0 until count.get(0)).map { ordinal ->
+                    check(cuDeviceGet(handle, ordinal), "cuDeviceGet")
+                    val device = handle.get(0)
+                    check(cuDeviceGetAttribute(value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device), "cuDeviceGetAttribute")
+                    val major = value.get(0)
+                    check(cuDeviceGetAttribute(value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device), "cuDeviceGetAttribute")
+                    check(cuDeviceTotalMem(bytes, device), "cuDeviceTotalMem")
+                    GpuDevice(ordinal, deviceName(device), major * 10 + value.get(0), bytes.get(0))
+                }
             }
+        }
+
+        /** A context on [device], current on the calling thread. */
+        fun create(device: GpuDevice): CudaContext {
+            initialise()
+            MemoryStack.stackPush().use { stack ->
+                val handle = stack.mallocInt(1)
+                check(cuDeviceGet(handle, device.ordinal), "cuDeviceGet")
+                val context = stack.mallocPointer(1)
+                check(cuDevicePrimaryCtxRetain(context, handle.get(0)), "cuDevicePrimaryCtxRetain")
+                return CudaContext(handle.get(0), context.get(0), device.name, device.computeCapability).also { it.makeCurrent() }
+            }
+        }
+
+        /** A context on the first device whose name holds [filter]; on the first device without one. */
+        fun create(filter: String? = deviceFilter()): CudaContext {
+            val devices = devices()
+            if (devices.isEmpty()) throw CudaException("no CUDA device found")
+            val device = devices.firstOrNull { filter.isNullOrBlank() || it.name.contains(filter, ignoreCase = true) }
+                ?: throw CudaException("no CUDA device matches $DEVICE_FILTER_ENV=$filter (found ${devices.joinToString { it.name }})")
+            return create(device)
         }
 
         /** Null when a CUDA device and NVRTC are usable, otherwise a short reason. */
@@ -274,3 +295,18 @@ class CudaContext private constructor(
 }
 
 class CudaException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+
+/**
+ * A CUDA device as the driver lists it: its place in that list, its name, its compute capability
+ * as major * 10 + minor (61 for a GTX 1070, 75 for an RTX 2060) and its memory.
+ */
+data class GpuDevice(val ordinal: Int, val name: String, val computeCapability: Int, val memoryBytes: Long) {
+    /**
+     * Whether the card has RT cores, which is what makes OptiX the faster engine on it. The name
+     * tells: the RTX cards have them, while a GTX 16 of the very same architecture does not.
+     */
+    val hasRtCores: Boolean get() = name.contains("RTX", ignoreCase = true)
+
+    /** The name without the maker's prefixes: "RTX 2060". */
+    val shortName: String get() = name.removePrefix("NVIDIA ").removePrefix("GeForce ")
+}
