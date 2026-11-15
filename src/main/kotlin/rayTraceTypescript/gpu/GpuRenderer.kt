@@ -99,6 +99,9 @@ class GpuRenderer : Renderer {
         private const val GUIDE_SAMPLES = 256
         fun unavailabilityReason(): String? = GpuSession.unavailabilityReason()
 
+        /** Set once the OptiX denoiser has turned out not to start here: the rest of the run denoises with OIDN. */
+        @Volatile private var optixDenoiserFailed = false
+
 
         fun cudaKernelSource(): String = resource("/kernels/raytracer.cu")
 
@@ -120,6 +123,8 @@ class GpuRenderer : Renderer {
                 try {
                     return OptixDenoiser(card)
                 } catch (t: Throwable) {
+                    // From now on no card is kept for a denoiser that is not there.
+                    optixDenoiserFailed = true
                     System.err.println("[gpu] the OptiX denoiser could not start on ${card.shortName} (${t.message}); denoising with OIDN on the CPU")
                 }
             }
@@ -148,13 +153,14 @@ class GpuRenderer : Renderer {
          * of one card, that card does both.
          */
         fun optixDenoiserCard(): GpuDevice? {
-            if (System.getProperty("rt.denoise")?.let { it != "off" } != true) return null
+            if (System.getProperty("rt.denoise")?.let { it != "off" } != true || optixDenoiserFailed) return null
             val mode = System.getProperty("rt.denoiser")?.lowercase() ?: GpuChoice.AUTO
             if (mode == "oidn") return null
             val devices = CudaContext.devices()
             val optixReason = rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason()
             if (devices.isEmpty() || optixReason != null) {
                 if (mode == "optix") System.err.println("[gpu] -Drt.denoiser=optix: ${optixReason ?: "no CUDA device"}; denoising with OIDN on the CPU")
+                optixDenoiserFailed = true
                 return null
             }
             System.getProperty("rt.denoiser.gpu")?.takeIf { it.isNotBlank() }?.let { named ->

@@ -686,6 +686,9 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         var openedOn: rayTraceTypescript.gpu.GpuChoice? = null
         try {
             GpuRenderer.requestedDenoiser().use { denoiser ->
+                // The card kept for denoising is the one the denoiser actually started on: if
+                // OptiX gave way to OIDN, no card sits out of the tracing for it.
+                gpuChoice = gpuChoice.copy(denoising = (denoiser as? rayTraceTypescript.gpu.optix.OptixDenoiser)?.device)
                 val open = { pixels: Int ->
                     val start = System.nanoTime()
                     val buffers = SceneFlattener.scene(buildWorld(), activeLights())

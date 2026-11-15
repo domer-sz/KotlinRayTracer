@@ -62,8 +62,25 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
      * per card - that choice as it was typed.
      */
     private val gpuOptions: List<Pair<String, String>> = run {
-        val standard = listOf("Wszystkie (${viewer.gpuDevices.size})" to rayTraceTypescript.gpu.GpuChoice.ALL) +
-            viewer.gpuDevices.map { it.shortName to it.ordinal.toString() }
+        val devices = viewer.gpuDevices
+        // With a card kept for denoising, "all" traces on the others: the list says so, and
+        // offers every card tracing (that one denoising as well) as a choice of its own.
+        val tracing = try {
+            viewer.gpuChoice.copy(gpus = rayTraceTypescript.gpu.GpuChoice.ALL)
+                .resolve(devices, rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason()).map { it.device }
+        } catch (t: Throwable) {
+            devices
+        }
+        val denoising = viewer.gpuChoice.denoising
+        val default = if (denoising != null && tracing.size < devices.size) {
+            listOf(
+                "${tracing.joinToString(" + ") { it.shortName }} śledzi, ${denoising.shortName} odszumia" to rayTraceTypescript.gpu.GpuChoice.ALL,
+                "Wszystkie śledzą (${devices.size})" to devices.joinToString(",") { it.ordinal.toString() }
+            )
+        } else {
+            listOf("Wszystkie (${devices.size})" to rayTraceTypescript.gpu.GpuChoice.ALL)
+        }
+        val standard = default + devices.map { it.shortName to it.ordinal.toString() }
         val started = viewer.gpuChoice.gpus
         if (indexOfGpus(standard, started) >= 0) standard else standard + ("-Drt.gpus=$started" to started)
     }
