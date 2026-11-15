@@ -597,12 +597,13 @@ object BookScenes {
      * a flat dark backdrop, a 1080x1920 portrait frame. The figure is scaled so its bounding
      * box has a half diagonal of 1 / 0.6162 (height 1.6226), which is what the lamps and the
      * camera there are laid out around. Meant for z-up STL files: -Drt.model=<path>.
-     * -Drt.studio.turn=<degrees> spins the figure about the vertical axis.
+     * -Drt.studio.turn=<degrees> spins the figure about the vertical axis; -Drt.studio.height=<h> sizes it otherwise.
      */
     fun studioModel(): SceneDefinition {
         val path = System.getProperty("rt.model") ?: System.getenv("MODEL_FILE") ?: "model.stl"
         val turn = System.getProperty("rt.studio.turn")?.toFloatOrNull() ?: 0.0f
-        val height = STUDIO_HEIGHT
+        // -Drt.studio.height sizes a figure the camera is not framed for, such as a block as wide as it is tall.
+        val height = System.getProperty("rt.studio.height")?.toFloatOrNull()?.takeIf { it > 0f } ?: STUDIO_HEIGHT
         // -0.4 EV on the emitters (lamps and backdrop): everything else only reflects them.
         val exposure = Math.pow(2.0, -0.4).toFloat()
 
