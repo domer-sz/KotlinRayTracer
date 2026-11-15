@@ -433,8 +433,16 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     private fun runFilm(job: FilmJob, denoiser: ImageDenoiser?, pixels: Int, open: (Int) -> GpuSession): GpuSession? {
         val turning = filmTurning()
         val originals = turning.map { doubleArrayOf(it.x, it.z, it.rotation) }
-        val axisX = originals.map { it[0] }.average()
-        val axisZ = originals.map { it[1] }.average()
+        // They turn together about the middle of their foot, as a turntable under their base
+        // would (gpu/Footprint) - not about their positions, which a raised sword pulls aside.
+        val (footX, footZ) = rayTraceTypescript.gpu.Footprint.axis(turning.map { o ->
+            when (o) {
+                is PlacedObject -> o.hittable()
+                is BuiltInObject -> o.hittable()
+            }
+        })
+        val axisX = footX.toDouble()
+        val axisZ = footZ.toDouble()
         val filmSetup = setup(view, job.size)
         var last: GpuSession? = null
         status = "Renderuję film obrotowy…"

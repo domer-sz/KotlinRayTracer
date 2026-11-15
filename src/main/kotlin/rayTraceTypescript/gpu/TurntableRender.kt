@@ -29,14 +29,12 @@ object TurntableRender {
         require(turning.isNotEmpty()) {
             "scene ${scene.name} has nothing to turn" + (wanted?.let { " named ${it.joinToString()}" } ?: "")
         }
-        // The axis: the middle of the turning parts' joint footprint.
-        val boxes = turning.map { it.hittable.aabbBoundingBox() }
-        val axisX = (boxes.minOf { it.x.min } + boxes.maxOf { it.x.max }) / 2f
-        val axisZ = (boxes.minOf { it.z.min } + boxes.maxOf { it.z.max }) / 2f
+        // The axis: the middle of the turning parts' foot, as StlViewer turns a figure (Footprint).
+        val (axisX, axisZ) = Footprint.axis(turning.map { it.hittable })
 
         val frames = settings.framesPerTurn
         println(
-            "Turntable: ${turning.joinToString { it.name }} - ${setup.imageWidth}x${setup.imageHeight}, " +
+            "Turntable: ${turning.joinToString { it.name }} about (%.4f, %.4f) - ${setup.imageWidth}x${setup.imageHeight}, ".format(axisX, axisZ) +
                 "$frames frames (${settings.seconds} s at ${settings.fps} fps) x ${settings.turns}, ${settings.samples} spp -> $output"
         )
 
