@@ -68,6 +68,23 @@ class GpuChoiceTest {
     }
 
     @Test
+    fun theCardThatDenoisesSitsOutOfTracingByAllUnlessItTracesBest() {
+        // The GTX 1070 denoising beside the RTX: it does not trace as well.
+        assertEquals(listOf(optixWherePossible), GpuChoice(denoising = gtx).resolve(both, null))
+        // The RTX denoising: it traces best, so it does both, and the GTX traces too.
+        assertEquals(listOf(optixWherePossible, GpuPick(gtx, Engine.CUDA)), GpuChoice(denoising = rtx).resolve(both, null))
+        // A card that is all there is does both.
+        val lone = gtx.copy(ordinal = 0)
+        assertEquals(listOf(GpuPick(lone, Engine.CUDA)), GpuChoice(denoising = lone).resolve(listOf(lone), null))
+    }
+
+    @Test
+    fun oneAndAListAreTakenAsTheyAreWhateverDenoises() {
+        assertEquals(listOf(optixWherePossible), GpuChoice(GpuChoice.ONE, denoising = rtx).resolve(both, null))
+        assertEquals(listOf(optixWherePossible, GpuPick(gtx, Engine.CUDA)), GpuChoice("0,1", denoising = gtx).resolve(both, null))
+    }
+
+    @Test
     fun aNameNoCardHasIsAnError() {
         assertThrows(CudaException::class.java) { GpuChoice("3090").resolve(both, null) }
         assertThrows(CudaException::class.java) { GpuChoice().resolve(emptyList(), null) }

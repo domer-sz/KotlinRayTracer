@@ -2,7 +2,9 @@ package rayTraceTypescript.gpu
 
 import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.render.CameraSetup
+import rayTraceTypescript.gpu.optix.OptixDenoiser
 import rayTraceTypescript.render.Denoiser
+import rayTraceTypescript.render.ImageDenoiser
 import rayTraceTypescript.render.PpmWriter
 import rayTraceTypescript.render.ProgressBar
 import rayTraceTypescript.render.Renderer
@@ -45,9 +47,17 @@ class GpuRenderer : Renderer {
                     val guideSamples = minOf(setup.samplesPerPixel, GUIDE_SAMPLES)
                     val albedo = renderAll(session, setup, GpuSession.MODE_ALBEDO, guideSamples, GpuSession.GUIDE)
                     val normal = renderAll(session, setup, GpuSession.MODE_NORMAL, guideSamples, GpuSession.GUIDE)
-                    val start = System.nanoTime()
-                    val clean = it.denoise(setup.imageWidth, setup.imageHeight, pixels, albedo, normal)
-                    System.err.println("[gpu] denoised in ${(System.nanoTime() - start) / 1_000_000} ms")
+                    // -Drt.denoise.repeat=N denoises the image N times more, to time a denoiser once it is set up.
+                    val runs = 1 + (System.getProperty("rt.denoise.repeat")?.toIntOrNull() ?: 0).coerceIn(0, 100)
+                    var clean = pixels
+                    repeat(runs) { run ->
+                        val start = System.nanoTime()
+                        clean = it.denoise(setup.imageWidth, setup.imageHeight, pixels, albedo, normal)
+                        val parts = (it as? OptixDenoiser)?.lastTimes?.let { t ->
+                            ": up %.1f ms, denoiser %.1f ms, back %.1f ms, setting up %.1f ms".format(t.uploadMs, t.denoiseMs, t.downloadMs, t.setupMs)
+                        } ?: ""
+                        System.err.println("[gpu] denoised${if (runs > 1) " (${run + 1} of $runs)" else ""} by ${it.name} in ${(System.nanoTime() - start) / 1_000_000} ms$parts")
+                    }
                     PpmWriter.write(denoisedPath(outputPath), setup.imageWidth, setup.imageHeight, clean)
                 }
             }
@@ -97,12 +107,22 @@ class GpuRenderer : Renderer {
             ?: throw IllegalStateException("kernel resource $path is missing from the jar")
 
         /**
-         * The denoiser, when -Drt.denoise asks for one (any value but "off") and its DLLs are
-         * found (see [Denoiser.folder]). Without them the render still runs, just without it.
+         * The denoiser, when -Drt.denoise asks for one (any value but "off"): NVIDIA's OptiX
+         * denoiser on the card [optixDenoiserCard] picks, or Intel Open Image Denoise on the CPU
+         * when OptiX is not to be had or -Drt.denoiser=oidn says so. An OptiX denoiser that
+         * cannot start gives way to OIDN; without OIDN's DLLs either (see [Denoiser.folder]) the
+         * render still runs, just without denoising.
          */
-        fun requestedDenoiser(): Denoiser? {
+        fun requestedDenoiser(): ImageDenoiser? {
             val wanted = System.getProperty("rt.denoise")?.let { it != "off" } ?: false
             if (!wanted) return null
+            optixDenoiserCard()?.let { card ->
+                try {
+                    return OptixDenoiser(card)
+                } catch (t: Throwable) {
+                    System.err.println("[gpu] the OptiX denoiser could not start on ${card.shortName} (${t.message}); denoising with OIDN on the CPU")
+                }
+            }
             val folder = Denoiser.folder()
             if (folder == null) {
                 System.err.println("[gpu] -Drt.denoise: no OpenImageDenoise.dll in -Drt.oidn / OIDN_DIR, rendering without denoising")
@@ -114,6 +134,34 @@ class GpuRenderer : Renderer {
                 System.err.println("[gpu] could not load Open Image Denoise from $folder: ${t.message}")
                 null
             }
+        }
+
+        /**
+         * The card the OptiX denoiser is to run on, or null when renders denoise with OIDN on the
+         * CPU, or not at all.
+         *
+         * -Drt.denoiser is `auto` (the default), `optix` or `oidn`. `auto` is OptiX wherever it
+         * can run - on a GTX 1070 it denoises a 1080x1920 frame in 0.3 s, OIDN on a four-core CPU
+         * in 1.3 s - and `optix` the same, insisting. The card is the one -Drt.denoiser.gpu names
+         * (its number in the driver's list or a piece of its name), else a card that does not
+         * trace best: beside an RTX card that traces, a second card would sit idle. On a machine
+         * of one card, that card does both.
+         */
+        fun optixDenoiserCard(): GpuDevice? {
+            if (System.getProperty("rt.denoise")?.let { it != "off" } != true) return null
+            val mode = System.getProperty("rt.denoiser")?.lowercase() ?: GpuChoice.AUTO
+            if (mode == "oidn") return null
+            val devices = CudaContext.devices()
+            val optixReason = rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason()
+            if (devices.isEmpty() || optixReason != null) {
+                if (mode == "optix") System.err.println("[gpu] -Drt.denoiser=optix: ${optixReason ?: "no CUDA device"}; denoising with OIDN on the CPU")
+                return null
+            }
+            System.getProperty("rt.denoiser.gpu")?.takeIf { it.isNotBlank() }?.let { named ->
+                return GpuChoice(named, "cuda").resolve(devices, null).first().device
+            }
+            val tracer = GpuChoice(GpuChoice.ONE).resolve(devices, optixReason).single().device
+            return devices.firstOrNull { it.ordinal != tracer.ordinal } ?: tracer
         }
     }
 }

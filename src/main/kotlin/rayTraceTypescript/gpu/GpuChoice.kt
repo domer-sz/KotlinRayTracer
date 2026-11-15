@@ -21,8 +21,12 @@ data class GpuPick(val device: GpuDevice, val engine: Engine, val fallback: Bool
  *
  * [backend] is `auto`, `optix` or `cuda`, for the entries that name no engine. `auto` is OptiX on
  * the cards with RT cores, where OptiX is installed, and the CUDA kernel on the others.
+ *
+ * [denoising] is the card the denoiser runs on, if one does. `all` leaves it out of the tracing
+ * - it has a job of its own - unless it is the card that traces best, which then does both;
+ * `one` and a list are taken as they are.
  */
-data class GpuChoice(val gpus: String = ALL, val backend: String = AUTO) {
+data class GpuChoice(val gpus: String = ALL, val backend: String = AUTO, val denoising: GpuDevice? = null) {
 
     /**
      * The cards among [devices] this choice means, never none. [optixReason] is why OptiX cannot
@@ -31,6 +35,8 @@ data class GpuChoice(val gpus: String = ALL, val backend: String = AUTO) {
      */
     fun resolve(devices: List<GpuDevice>, optixReason: String?): List<GpuPick> {
         if (devices.isEmpty()) throw CudaException("no CUDA device found")
+        // The card OptiX can use first, then the newest architecture; the driver's order breaks ties.
+        val best = devices.maxWith(compareBy<GpuDevice> { it.hasRtCores && optixReason == null }.thenBy { it.computeCapability }.thenBy { -it.ordinal })
         fun pick(device: GpuDevice, engine: String): GpuPick = when (engine.lowercase()) {
             "cuda" -> GpuPick(device, Engine.CUDA)
             "optix" -> {
@@ -42,12 +48,8 @@ data class GpuChoice(val gpus: String = ALL, val backend: String = AUTO) {
         }
 
         return when (gpus.trim().lowercase()) {
-            ALL, "" -> devices.map { pick(it, backend) }
-            ONE -> {
-                // The card OptiX can use first, then the newest architecture; the driver's order breaks ties.
-                val best = devices.maxWith(compareBy<GpuDevice> { it.hasRtCores && optixReason == null }.thenBy { it.computeCapability }.thenBy { -it.ordinal })
-                listOf(pick(best, backend))
-            }
+            ALL, "" -> devices.filter { it == best || it.ordinal != denoising?.ordinal }.map { pick(it, backend) }
+            ONE -> listOf(pick(best, backend))
             else -> gpus.split(',').map { it.trim() }.filter { it.isNotEmpty() }.flatMap { entry ->
                 val selector = entry.substringBefore(':').trim()
                 val engine = entry.substringAfter(':', backend).trim()
@@ -67,10 +69,19 @@ data class GpuChoice(val gpus: String = ALL, val backend: String = AUTO) {
         const val ONE = "one"
         const val AUTO = "auto"
 
-        /** -Drt.gpus (or the older RT_GPU_DEVICE name filter) and -Drt.backend; every card and `auto` without them. */
+        /**
+         * -Drt.gpus (or the older RT_GPU_DEVICE name filter) and -Drt.backend; every card and
+         * `auto` without them. The card the denoiser will run on comes from the denoising
+         * switches ([GpuRenderer.optixDenoiserCard]).
+         */
         fun fromProperties(): GpuChoice = GpuChoice(
             System.getProperty("rt.gpus") ?: CudaContext.deviceFilter() ?: ALL,
-            System.getProperty("rt.backend") ?: AUTO
+            System.getProperty("rt.backend") ?: AUTO,
+            try {
+                GpuRenderer.optixDenoiserCard()
+            } catch (t: Throwable) {
+                null
+            }
         )
     }
 }

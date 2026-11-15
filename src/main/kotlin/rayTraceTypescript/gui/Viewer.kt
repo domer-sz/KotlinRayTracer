@@ -12,7 +12,7 @@ import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.objects.HittableList
 import rayTraceTypescript.objects.MeshLoader
 import rayTraceTypescript.render.CameraSetup
-import rayTraceTypescript.render.Denoiser
+import rayTraceTypescript.render.ImageDenoiser
 import rayTraceTypescript.render.PpmWriter
 import rayTraceTypescript.scenes.SceneDefinition
 import java.awt.BasicStroke
@@ -430,7 +430,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
      * angle and rebuilds the GPU scene through [open]; afterwards they stand as before. Returns the
      * session it last used, which may be a new one when the film is larger than the view.
      */
-    private fun runFilm(job: FilmJob, denoiser: Denoiser?, pixels: Int, open: (Int) -> GpuSession): GpuSession? {
+    private fun runFilm(job: FilmJob, denoiser: ImageDenoiser?, pixels: Int, open: (Int) -> GpuSession): GpuSession? {
         val turning = filmTurning()
         val originals = turning.map { doubleArrayOf(it.x, it.z, it.rotation) }
         val axisX = originals.map { it[0] }.average()
@@ -706,7 +706,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                         }
                     }
                     // Which cards are tracing, and how, shows under the panel's list of cards.
-                    val inUse = next.devices.joinToString(" + ")
+                    val inUse = next.devices.joinToString(" + ") + (denoiser?.let { " · odszumia ${it.name}" } ?: "")
                     gpusInUse = inUse
                     SwingUtilities.invokeLater { if (::controls.isInitialized) controls.showGpus(inUse) }
                     System.err.println("[viewer] scene rebuilt: flatten ${(flattened - start) / 1_000_000} ms, upload ${(System.nanoTime() - flattened) / 1_000_000} ms")
@@ -728,7 +728,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         }
     }
 
-    private fun loop(denoiser: Denoiser?, open: (Int) -> GpuSession) {
+    private fun loop(denoiser: ImageDenoiser?, open: (Int) -> GpuSession) {
         var session: GpuSession? = null
         var builtVersion = -1
         var builtGpus = -1

@@ -1,7 +1,7 @@
 package rayTraceTypescript.gpu
 
 import rayTraceTypescript.render.CameraSetup
-import rayTraceTypescript.render.Denoiser
+import rayTraceTypescript.render.ImageDenoiser
 import rayTraceTypescript.render.VideoEncoder
 import java.nio.file.Path
 import java.util.concurrent.Executors
@@ -111,7 +111,7 @@ object TurntableFilm {
     fun render(
         setup: CameraSetup,
         settings: TurntableSettings,
-        denoiser: Denoiser?,
+        denoiser: ImageDenoiser?,
         output: Path,
         sessionFor: (frame: Int) -> GpuSession,
         cancelled: () -> Boolean = { false },
