@@ -139,7 +139,9 @@ normals and no clamp.
   frame's time goes at the end (`[film] a frame on average: ...`):
   - defaults - the RTX 2060 traces through OptiX, the GTX 1070 denoises through OptiX:
     **0.52 s a frame** (scene 10 ms, tracing 386 ms, guides 108 ms, no waiting; denoising 323 ms
-    beside it), so 450 frames take ~4 min;
+    beside it). Full film, same day, the command above: 450 frames at 0.46 s = **3.5 min**
+    (renders/003-yennefer-gold-koltin-max-rtx.mp4, 17.1 MB, 9.13 Mbit/s) - 7.6 times as fast as
+    the OpenCL film on the GTX 1070 (26 min), 3.9 times as fast as StlViewer's (13.6 min);
   - `-Drt.denoiser=oidn` (as all films before this day): 1.51 s a frame, of it 893 ms waiting for
     OIDN on the CPU (1447 ms a frame);
   - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.
