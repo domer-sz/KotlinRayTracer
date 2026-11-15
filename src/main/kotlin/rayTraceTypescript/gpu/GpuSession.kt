@@ -89,8 +89,14 @@ interface GpuSession : AutoCloseable {
         const val SLICE_MS = 200.0
         internal const val CAMERA_FLOATS = 23
 
-        /** A session for [scene], with outputs for up to [maxPixels] pixels. */
-        fun open(scene: SceneBuffers, maxPixels: Int): GpuSession = CudaSession(scene, maxPixels)
+        /**
+         * A session for [scene], with outputs for up to [maxPixels] pixels. -Drt.backend=optix
+         * traces through OptiX ([rayTraceTypescript.gpu.optix.OptixSession]) instead of the
+         * renderer's own CUDA kernel.
+         */
+        fun open(scene: SceneBuffers, maxPixels: Int): GpuSession =
+            if (System.getProperty("rt.backend") == "optix") rayTraceTypescript.gpu.optix.OptixSession(scene, maxPixels)
+            else CudaSession(scene, maxPixels)
 
         /** Null when a CUDA device and the kernel compiler are usable here, otherwise a short reason. */
         fun unavailabilityReason(): String? = CudaContext.unavailabilityReason()

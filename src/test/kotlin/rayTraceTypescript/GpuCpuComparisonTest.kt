@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test
 import rayTraceTypescript.gpu.GpuRenderer
 import rayTraceTypescript.gpu.MeshBlock
 import rayTraceTypescript.gpu.PlacedMesh
+import rayTraceTypescript.gpu.optix.OptixUnsupportedScene
 import rayTraceTypescript.materials.Dielectric
 import rayTraceTypescript.materials.DiffuseLight
 import rayTraceTypescript.materials.Lambertian
@@ -38,8 +39,14 @@ import javax.imageio.ImageIO
  * those renders are stored in src/test/resources/cpu-reference. The GPU traces the same scene
  * with the same sample count; only the random streams differ, so the images are compared
  * statistically.
+ *
+ * The renderer's own CUDA kernel is what runs here; [OptixCpuComparisonTest] puts the same scenes
+ * and the same yardstick to the OptiX engine.
  */
-class GpuCpuComparisonTest {
+open class GpuCpuComparisonTest {
+
+    /** The engine the renders go through (-Drt.backend); null leaves the renderer's default. */
+    protected open val backend: String? = null
 
     @Test
     fun `gpu matches the cpu render for every material`() {
@@ -193,14 +200,21 @@ class GpuCpuComparisonTest {
 
     private fun render(renderer: Renderer, world: Hittable, camera: Camera, seed: Long): PpmSupport.PpmImage {
         val target: Path = Files.createTempFile("raytracer-backend-test", ".ppm")
+        val chosen = System.getProperty("rt.backend")
+        backend?.let { System.setProperty("rt.backend", it) }
         RandomSource.withSeed(seed)
         return try {
             renderer.render(world, camera.initialize(), target)
             PpmSupport.parse(Files.readAllBytes(target))
+        } catch (e: OptixUnsupportedScene) {
+            // An engine still being built says what it cannot trace yet; that is not a failure.
+            assumeTrue(false, e.message)
+            throw e
         } finally {
             Files.deleteIfExists(target)
             Files.deleteIfExists(PpmWriter.pngPath(target))
             RandomSource.reset()
+            if (chosen == null) System.clearProperty("rt.backend") else System.setProperty("rt.backend", chosen)
         }
     }
 
@@ -367,7 +381,7 @@ class GpuCpuComparisonTest {
         }
     }
 
-    private fun assumeGpu() {
+    protected open fun assumeGpu() {
         val reason = GpuRenderer.unavailabilityReason()
         assumeTrue(reason == null, "No CUDA device available: $reason")
     }

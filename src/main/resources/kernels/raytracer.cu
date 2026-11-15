@@ -7,6 +7,22 @@
 // what OpenCL C has built in - vector arithmetic on float3, dot / cross / length / clamp.
 // float3 here is 12 bytes (OpenCL's is 16): no buffer is read through a struct holding one,
 // only through float, int, int2 and float4 pointers, so the host layouts are unchanged.
+//
+// With -DRT_OPTIX=1 the same path tracer is built as an OptiX program instead (gpu/optix): OptiX
+// finds the hits - on an RTX card its RT cores do - and everything else is the code below,
+// shared. Only world_hit and the entry point differ.
+
+#ifndef RT_OPTIX
+#define RT_OPTIX 0
+#endif
+
+#if RT_OPTIX
+// NVRTC does not say which host it builds for, and OptiX sizes its device pointers by it.
+#if !defined(_WIN64) && !defined(__LP64__)
+#define _WIN64 1
+#endif
+#include <optix.h>
+#endif
 
 #define M_PI_F 3.14159265358979323846f
 #define INFINITY __int_as_float(0x7f800000)
@@ -496,6 +512,84 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
     rec->normal = rec->frontFace ? outwardNormal : -outwardNormal;
 }
 
+#if RT_OPTIX
+
+// What an OptiX launch is given: the scene's buffers, which the CUDA kernel takes as arguments,
+// the tree OptiX searches, and the launch's numbers. gpu/optix/OptixSession fills it; its
+// pointers and 64-bit numbers come first, so nothing is padded between the fields.
+struct Params {
+    const float* cam;
+    const float4* nodes;
+    const int2* leaves;
+    const int2* refs;
+    const float* spheres;
+    const int* sphereMaterials;
+    const float4* triangles;
+    const int* triangleMaterials;
+    const float* quads;
+    const int* quadMaterials;
+    const int* mediumInts;
+    const float* mediumFloats;
+    const int* lights;
+    const int* matI;
+    const float* matF;
+    const int* texI;
+    const float* texF;
+    const unsigned char* images;
+    const float* perlinVectors;
+    const int* perlinPermutations;
+    float* out;
+    const int* quadIds;                  // the quad each pair of triangles in the tree stands for
+    OptixTraversableHandle handle;
+    unsigned long long seed;
+    int width;
+    int height;
+    int sampleStart;
+    int sampleCount;
+    int maxReflectionDepth;
+    float pixelSamplesScale;
+    int rootNode;
+    int lightCount;
+    int quadInput;                       // which of the tree's inputs holds the quads; -1 without any
+};
+
+extern "C" {
+__constant__ Params params;
+}
+
+// The closest hit, asked of OptiX. It comes back in the ray's payload as the closest-hit program
+// at the end of this file fills it: what was hit, where along the ray, and a triangle's
+// barycentric coordinates - which are the u/v triangle_t reports.
+__device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float3 direction, float time,
+                      float tMin, float tMax, Rng* rng, HitRecord* rec) {
+    unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u;
+    optixTrace(params.handle, origin, direction, tMin, tMax, 0.0f, OptixVisibilityMask(255),
+               OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v);
+    if (kind == 0u) return false;
+
+    Closest found;
+    found.kind = (int)kind;
+    found.index = (int)index;
+    found.t = __uint_as_float(t);
+    found.u = __uint_as_float(u);
+    found.v = __uint_as_float(v);
+    if (HAS_QUADS && found.kind == LEAF_QUAD) {
+        // OptiX sees a quad as two triangles; its own u/v come from the hit point, as in quad_t.
+        const float* data = sc->quads + found.index * 16;
+        float3 Q = make_float3(data[0], data[1], data[2]);
+        float3 edgeU = make_float3(data[3], data[4], data[5]);
+        float3 edgeV = make_float3(data[6], data[7], data[8]);
+        float3 w = make_float3(data[9], data[10], data[11]);
+        float3 planarHit = origin + found.t * direction - Q;
+        found.u = dot(w, cross(planarHit, edgeV));
+        found.v = dot(w, cross(edgeU, planarHit));
+    }
+    finish_hit(sc, &found, origin, direction, time, rec);
+    return true;
+}
+
+#else
+
 __device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float3 direction, float time,
                       float tMin, float tMax, Rng* rng, HitRecord* rec) {
     Closest found;
@@ -507,6 +601,8 @@ __device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float
     finish_hit(sc, &found, origin, direction, time, rec);
     return true;
 }
+
+#endif
 
 // ---------------------------------------------------------------- noise
 
@@ -857,6 +953,68 @@ __device__ inline float light_pdf_value(const Scene* sc, const int* lights, int 
 
 // ---------------------------------------------------------------- entry point
 
+#if RT_OPTIX
+
+// The hit OptiX settled on, for world_hit to read back.
+extern "C" __global__ void __closesthit__surface() {
+    unsigned int primitive = optixGetPrimitiveIndex();
+    float2 barycentrics = optixGetTriangleBarycentrics();
+    if ((int)optixGetSbtGASIndex() == params.quadInput) {
+        optixSetPayload_0((unsigned int)LEAF_QUAD);
+        optixSetPayload_1((unsigned int)params.quadIds[primitive >> 1]);
+    } else {
+        optixSetPayload_0((unsigned int)LEAF_TRIANGLE);
+        optixSetPayload_1(primitive);
+    }
+    optixSetPayload_2(__float_as_uint(optixGetRayTmax()));
+    optixSetPayload_3(__float_as_uint(barycentrics.x));
+    optixSetPayload_4(__float_as_uint(barycentrics.y));
+}
+
+extern "C" __global__ void __miss__nothing() {
+    optixSetPayload_0(0u);
+}
+
+// One launch index is one pixel. The names below are the CUDA kernel's arguments, so the body
+// that follows is the same text for both.
+extern "C" __global__ void __raygen__render() {
+    const float* cam = params.cam;
+    const float4* nodes = params.nodes;
+    const int2* leaves = params.leaves;
+    const int2* refs = params.refs;
+    const float* spheres = params.spheres;
+    const int* sphereMaterials = params.sphereMaterials;
+    const float4* triangles = params.triangles;
+    const int* triangleMaterials = params.triangleMaterials;
+    const float* quads = params.quads;
+    const int* quadMaterials = params.quadMaterials;
+    const int* mediumInts = params.mediumInts;
+    const float* mediumFloats = params.mediumFloats;
+    const int* lights = params.lights;
+    const int* matI = params.matI;
+    const float* matF = params.matF;
+    const int* texI = params.texI;
+    const float* texF = params.texF;
+    const unsigned char* images = params.images;
+    const float* perlinVectors = params.perlinVectors;
+    const int* perlinPermutations = params.perlinPermutations;
+    float* out = params.out;
+    const int width = params.width;
+    const int height = params.height;
+    const int sampleStart = params.sampleStart;
+    const int sampleCount = params.sampleCount;
+    const int maxReflectionDepth = params.maxReflectionDepth;
+    const float pixelSamplesScale = params.pixelSamplesScale;
+    const int rootNode = params.rootNode;
+    const int lightCount = params.lightCount;
+    const unsigned long long seed = params.seed;
+
+    const uint3 launchIndex = optixGetLaunchIndex();
+    int x = (int)launchIndex.x;
+    int y = (int)launchIndex.y;
+
+#else
+
 extern "C" __global__ void render(const float* __restrict__ cam,
                      const float4* __restrict__ nodes,
                      const int2* __restrict__ leaves,
@@ -895,6 +1053,8 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     int x = (tile % tilesX) * 8 + (lane & 7);
     int y = (tile / tilesX) * 4 + (lane >> 3);
     if (x >= width || y >= height) return;
+
+#endif
 
     Scene scene;
     scene.nodes = nodes;
