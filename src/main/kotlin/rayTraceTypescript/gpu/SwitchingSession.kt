@@ -46,6 +46,8 @@ internal class SwitchingSession(private val device: GpuDevice, scene: SceneBuffe
 
     override fun clear(target: Int) = current.clear(target)
 
+    override fun prepare(mode: Int) = current.prepare(mode)
+
     override fun close() = current.close()
 
     private fun openFor(scene: SceneBuffers): GpuSession {

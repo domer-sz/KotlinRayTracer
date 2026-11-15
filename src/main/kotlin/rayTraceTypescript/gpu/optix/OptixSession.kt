@@ -127,6 +127,11 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
         CudaContext.check(cuMemsetD32(outputs[target], 0, maxPixels * 3L), "cuMemsetD32")
     }
 
+    override fun prepare(mode: Int) {
+        cuda.makeCurrent()
+        pipeline(mode)
+    }
+
     override fun close() {
         try {
             cuda.makeCurrent()

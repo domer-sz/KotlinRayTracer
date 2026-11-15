@@ -56,6 +56,73 @@ class MultiGpuSessionTest {
     }
 
     @Test
+    fun shortLaunchesInARowNeverFallToTheSlowCard() {
+        // What a viewer does: many launches of a few samples. Whichever card's thread wakes first
+        // must not see itself alone and take them - the slow card would then set the pace.
+        val fast = FakeCard("fast", msPerSample = 1)
+        val slow = FakeCard("slow", msPerSample = 60)
+        session(fast, slow).use { session ->
+            session.launch(GpuSession.MODE_IMAGE, setup, 0, 2, 1.0f)
+            val before = slow.traced.size
+            var sample = 2
+            repeat(60) {
+                session.launch(GpuSession.MODE_IMAGE, setup, sample, 4, 1.0f)
+                sample += 4
+            }
+            assertEquals(before, slow.traced.size, "the slow card took samples of launches too short for it")
+            assertEquals((0 until sample).toList(), (fast.traced + slow.traced).sorted())
+        }
+    }
+
+    @Test
+    fun aCardThatIsTimedLateIsStillTimedAndThenTakesTheLead() {
+        // The fast card is still building its kernel when the first samples are given out, so the
+        // slow one is timed first - and nobody waits for a compiler, so it traces them alone.
+        // Once the fast card is ready, the slow one must not pass for the only card there is.
+        val fast = FakeCard("fast", msPerSample = 1, prepareMs = 150)
+        val slow = FakeCard("slow", msPerSample = 30)
+        session(fast, slow).use { session ->
+            var sample = 0
+            repeat(12) { session.launch(GpuSession.MODE_IMAGE, setup, sample++, 1, 1.0f) }
+            assertTrue(fast.traced.isNotEmpty(), "the fast card was never given a sample to be timed with")
+
+            val before = slow.traced.size
+            repeat(30) {
+                session.launch(GpuSession.MODE_IMAGE, setup, sample, 4, 1.0f)
+                sample += 4
+            }
+            assertEquals(before, slow.traced.size, "the slow card kept taking samples once the fast one was timed")
+        }
+    }
+
+    @Test
+    fun aShortRangeIsOneLaunchForEachCardThatTakesPart() {
+        // A launch costs something whatever it traces, so a range that fits in one turn must not
+        // be cut finer: the quick card takes its part at once, and the slow one what is left for it.
+        val fast = FakeCard("fast", msPerSample = 1)
+        val slow = FakeCard("slow", msPerSample = 4)
+        session(fast, slow).use { session ->
+            // The cards are timed, and their turns grow to the size of the range.
+            session.launch(GpuSession.MODE_IMAGE, setup, 0, 2, 1.0f)
+            var sample = 2
+            repeat(4) {
+                session.launch(GpuSession.MODE_IMAGE, setup, sample, 27, 1.0f)
+                sample += 27
+            }
+            val fastLaunches = fast.launches.get()
+            val slowLaunches = slow.launches.get()
+            val slowSamples = slow.traced.size
+
+            session.launch(GpuSession.MODE_IMAGE, setup, sample, 27, 1.0f)
+
+            assertEquals(1, fast.launches.get() - fastLaunches, "launches of the fast card")
+            assertEquals(1, slow.launches.get() - slowLaunches, "launches of the slow card")
+            // A fifth of the speed between them is the slow card's: 5 of 27 samples, give or take the timing.
+            assertTrue(slow.traced.size - slowSamples in 4..6, "the slow card took ${slow.traced.size - slowSamples} of 27 samples")
+        }
+    }
+
+    @Test
     fun aNewAccumulationLeavesOutWhatACardHoldsFromTheOldOne() {
         val a = FakeCard("a", msPerSample = 2)
         val b = FakeCard("b", msPerSample = 2)
@@ -134,10 +201,13 @@ class MultiGpuSessionTest {
 
     /** A card that takes [msPerSample] for a sample and adds (sample + 1) * scale to every pixel. */
     private inner class FakeCard(
-        val name: String, private val msPerSample: Long, private val loadMs: Long = 0, private val failing: Boolean = false
+        val name: String, private val msPerSample: Long, private val loadMs: Long = 0, private val failing: Boolean = false,
+        private val prepareMs: Long = 0
     ) : GpuSession {
         val traced = ConcurrentLinkedQueue<Int>()
+        val launches = java.util.concurrent.atomic.AtomicInteger()
         private val outputs = Array(2) { FloatArray(pixels) }
+        private var prepared = false
         override var seed = 0L
         override val devices = listOf(name)
 
@@ -147,6 +217,7 @@ class MultiGpuSessionTest {
 
         override fun launch(mode: Int, setup: CameraSetup, sampleStart: Int, count: Int, scale: Float, target: Int) {
             if (failing) throw IllegalStateException("$name lost its card")
+            launches.incrementAndGet()
             Thread.sleep(msPerSample * count)
             // As the kernels do: the launch holding sample 0 overwrites, any other adds.
             if (sampleStart == 0) outputs[target].fill(0.0f)
@@ -161,6 +232,12 @@ class MultiGpuSessionTest {
         }
 
         override fun clear(target: Int) = outputs[target].fill(0.0f)
+
+        // The first time, the kernel is "built".
+        override fun prepare(mode: Int) {
+            if (!prepared) Thread.sleep(prepareMs)
+            prepared = true
+        }
 
         override fun close() {}
     }

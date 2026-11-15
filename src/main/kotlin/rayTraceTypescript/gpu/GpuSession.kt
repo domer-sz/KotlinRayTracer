@@ -49,6 +49,12 @@ interface GpuSession : AutoCloseable {
      */
     fun clear(target: Int)
 
+    /**
+     * Builds what tracing in [mode] needs - its kernel - unless it is built. A launch does so
+     * anyway; calling this first keeps the compiler's time out of a launch that is being timed.
+     */
+    fun prepare(mode: Int)
+
     /** The cards tracing and their engines, for a status line: "RTX 2060 (OptiX)". */
     val devices: List<String>
 

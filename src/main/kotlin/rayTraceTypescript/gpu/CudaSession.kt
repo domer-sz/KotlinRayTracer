@@ -119,6 +119,11 @@ internal class CudaSession(initialScene: SceneBuffers, private val maxPixels: In
         CudaContext.check(cuMemsetD32(outputs[target], 0, maxPixels * 3L), "cuMemsetD32")
     }
 
+    override fun prepare(mode: Int) {
+        cuda.makeCurrent()
+        kernel(mode)
+    }
+
     /** The compiled kernel for [mode], built on first use. */
     private fun kernel(mode: Int): Long = kernels.getOrPut(mode) {
         val start = System.nanoTime()
