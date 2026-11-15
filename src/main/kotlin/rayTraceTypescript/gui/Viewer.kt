@@ -126,6 +126,29 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
      * shaded by the surface's colour, sharp at once. -Drt.gui.raytrace opens in ray tracing.
      */
     @Volatile var raytrace = System.getProperty("rt.gui.raytrace") != null
+
+    /** The cards of this machine, for the panel's list; empty where they cannot be listed. */
+    val gpuDevices: List<rayTraceTypescript.gpu.GpuDevice> = try {
+        rayTraceTypescript.gpu.CudaContext.devices()
+    } catch (t: Throwable) {
+        emptyList()
+    }
+    private val gpuVersion = AtomicInteger(0)
+    /**
+     * Which cards render and with which engine: -Drt.gpus and -Drt.backend to start with, then
+     * what the panel's list says. A change opens the GPU session afresh.
+     */
+    @Volatile var gpuChoice: rayTraceTypescript.gpu.GpuChoice = rayTraceTypescript.gpu.GpuChoice.fromProperties()
+        set(value) {
+            if (value == field) return
+            field = value
+            gpuVersion.incrementAndGet()
+            touch()
+        }
+    /** The cards tracing right now and their engines, as the GPU session names them. */
+    @Volatile var gpusInUse = ""
+        private set
+
     @Volatile private var lastInput = 0L
     @Volatile private var dragging = false
     @Volatile private var running = true
@@ -660,6 +683,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     private fun renderLoop() {
         var session: GpuSession? = null
         var capacity = 0
+        var openedOn: rayTraceTypescript.gpu.GpuChoice? = null
         try {
             GpuRenderer.requestedDenoiser().use { denoiser ->
                 val open = { pixels: Int ->
@@ -667,17 +691,24 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                     val buffers = SceneFlattener.flatten(buildWorld(), activeLights())
                     val flattened = System.nanoTime()
                     val current = session
-                    // An edited scene goes into the session there is; a bigger image needs a new one.
-                    val next = if (current != null && pixels <= capacity) {
+                    val choice = gpuChoice
+                    // An edited scene goes into the session there is; a bigger image, or other
+                    // cards to render on, need a new one.
+                    val next = if (current != null && pixels <= capacity && choice == openedOn) {
                         current.also { it.replaceScene(buffers) }
                     } else {
                         current?.close()
                         session = null
-                        GpuSession.open(buffers, pixels).also {
+                        GpuSession.open(buffers, pixels, choice).also {
                             session = it
                             capacity = pixels
+                            openedOn = choice
                         }
                     }
+                    // Which cards are tracing, and how, shows under the panel's list of cards.
+                    val inUse = next.devices.joinToString(" + ")
+                    gpusInUse = inUse
+                    SwingUtilities.invokeLater { if (::controls.isInitialized) controls.showGpus(inUse) }
                     System.err.println("[viewer] scene rebuilt: flatten ${(flattened - start) / 1_000_000} ms, upload ${(System.nanoTime() - flattened) / 1_000_000} ms")
                     next
                 }
@@ -700,6 +731,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     private fun loop(denoiser: Denoiser?, open: (Int) -> GpuSession) {
         var session: GpuSession? = null
         var builtVersion = -1
+        var builtGpus = -1
         var sessionPixels = 0
 
         var accumulated: View? = null
@@ -749,10 +781,12 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             val version = sceneVersion.get()
             // Rebuild the GPU copy when the objects changed (once edits pause) or the image outgrew it.
             val sceneStale = version != builtVersion && System.currentTimeMillis() - lastSceneEdit > REBUILD_DELAY_MS
-            if (session == null || sceneStale || size.pixels > sessionPixels) {
+            val gpus = gpuVersion.get()
+            if (session == null || sceneStale || size.pixels > sessionPixels || gpus != builtGpus) {
                 sessionPixels = maxOf(size.pixels, sceneResolution.pixels)
                 session = open(sessionPixels)
                 builtVersion = version
+                builtGpus = gpus
                 accumulated = null
             }
 

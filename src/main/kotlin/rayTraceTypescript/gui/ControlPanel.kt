@@ -56,6 +56,26 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         toolTipText = "Ile razy promień może się odbić lub załamać, zanim ścieżka się urwie. " +
             "Mniej: szybciej, ciemniej w zakamarkach i w szkle; więcej: pełniejsze światło odbite."
     }
+    /**
+     * What the list of cards offers, as (label, -Drt.gpus value): all of them, each by itself,
+     * and - when the window was started with a choice the list cannot spell, such as an engine
+     * per card - that choice as it was typed.
+     */
+    private val gpuOptions: List<Pair<String, String>> = run {
+        val standard = listOf("Wszystkie (${viewer.gpuDevices.size})" to rayTraceTypescript.gpu.GpuChoice.ALL) +
+            viewer.gpuDevices.map { it.shortName to it.ordinal.toString() }
+        val started = viewer.gpuChoice.gpus
+        if (indexOfGpus(standard, started) >= 0) standard else standard + ("-Drt.gpus=$started" to started)
+    }
+    private val gpus = JComboBox(gpuOptions.map { it.first }.toTypedArray()).apply {
+        selectedIndex = indexOfGpus(gpuOptions, viewer.gpuChoice.gpus).coerceAtLeast(0)
+        toolTipText = "Karty graficzne, które liczą obraz (-Drt.gpus)"
+    }
+    /** The cards tracing right now and the engine of each, as the GPU session names them. */
+    private val gpusInUse = JLabel(viewer.gpusInUse.ifEmpty { " " }).apply {
+        font = Theme.font(11.5f)
+        foreground = Theme.muted
+    }
     private val progress = JProgressBar(0, 1000).apply { isStringPainted = true }
     private val saveSceneButton = JButton("Zapisz…").apply { toolTipText = "Zapisz scenę do pliku .${SceneFile.EXTENSION} (Ctrl+S)" }
     private val loadSceneButton = JButton("Wczytaj…").apply { toolTipText = "Wczytaj scenę z pliku .${SceneFile.EXTENSION} (Ctrl+O)" }
@@ -178,6 +198,11 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         full(applySize)
         field("Cel spp", target)
         field("Odbicia (maks.)", depth)
+        // With one card there is nothing to choose.
+        if (viewer.gpuDevices.size > 1) {
+            field("Karty", gpus)
+            full(gpusInUse)
+        }
         full(progress)
         full(denoise)
         full(save)
@@ -245,6 +270,7 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         }
         target.addChangeListener { viewer.targetSamples = target.value as Int }
         depth.addChangeListener { viewer.maxDepth = depth.value as Int }
+        gpus.addActionListener { viewer.gpuChoice = viewer.gpuChoice.copy(gpus = gpuOptions[gpus.selectedIndex].second) }
         denoise.addActionListener { viewer.denoiseOn = denoise.isSelected }
         saveSceneButton.addActionListener { chooseSceneToSave() }
         loadSceneButton.addActionListener { chooseSceneToLoad() }
@@ -403,6 +429,11 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
                 JOptionPane.showMessageDialog(frame, warnings.joinToString("\n"), "Scena wczytana z uwagami", JOptionPane.WARNING_MESSAGE)
             }
         }
+    }
+
+    /** Shows which cards are tracing and with what, e.g. "RTX 2060 (OptiX) + GTX 1070 (CUDA)". */
+    fun showGpus(inUse: String) {
+        gpusInUse.text = inUse
     }
 
     /** Fills every field from the viewer, after a scene was loaded into it. */
@@ -575,5 +606,9 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         private const val CUSTOM = "Własny"
         /** The preset list's entry for a model made of the materials its file names. */
         private const val FILE_COLOURS = "Kolory z pliku"
+
+        /** Where the -Drt.gpus value [gpus] stands among [options] (label, value), or -1. */
+        private fun indexOfGpus(options: List<Pair<String, String>>, gpus: String): Int =
+            options.indexOfFirst { it.second.equals(gpus.trim(), ignoreCase = true) }
     }
 }
