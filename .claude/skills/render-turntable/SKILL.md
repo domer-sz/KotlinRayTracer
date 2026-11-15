@@ -7,7 +7,8 @@ description: Render a ray traced turntable film (MP4) of a model with KoltinRayT
 
 The film comes from the renderer itself: `-Drt.turntable=<file.mp4>` on any scene turns the
 scene's objects (its parts that are neither lights nor walls) about the middle of their
-footprint, one frame per step, denoises each frame (OIDN) and pipes it to ffmpeg. What the
+footprint, one frame per step, denoises each frame (OptiX on the second card by default, OIDN on
+the CPU with `-Drt.denoiser=oidn`) and pipes it to ffmpeg. What the
 code does and why: `AGENTS.md`, section *Turntable Films*.
 
 ## Before starting
@@ -132,7 +133,21 @@ Expect a systematic gap, not noise: frame 0 came out at 25.8 dB / SSIM 0.887 and
 StlViewer smooths vertex normals and clamps fireflies at 16; this renderer uses flat facet
 normals and no clamp.
 
-## Measured (GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
+## Measured (RTX 2060 + GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
+
+- 2026-11-15, driver 581.57, 30-frame film with the command's settings. The film prints where a
+  frame's time goes at the end (`[film] a frame on average: ...`):
+  - defaults - the RTX 2060 traces through OptiX, the GTX 1070 denoises through OptiX:
+    **0.52 s a frame** (scene 10 ms, tracing 386 ms, guides 108 ms, no waiting; denoising 323 ms
+    beside it), so 450 frames take ~4 min;
+  - `-Drt.denoiser=oidn` (as all films before this day): 1.51 s a frame, of it 893 ms waiting for
+    OIDN on the CPU (1447 ms a frame);
+  - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.
+- The OptiX denoiser looks like OIDN, a touch sharper in folds and faces: against a 4096-spp still
+  it scores 34.0 dB PSNR, OIDN 33.3 dB. Films published before 2026-11-15 were denoised by OIDN;
+  `-Drt.denoiser=oidn` renders a film that matches them.
+
+## Measured (GTX 1070 alone, before the RTX 2060; Yennefer, 1080x1920, 64 spp)
 
 - CUDA (the renderer now), 2026-11-02: a 30-frame film with the command's settings took 8.8 s
   for the first frame (model tree and kernels built) and then 3.0-3.2 s a frame (frames 10-30).
