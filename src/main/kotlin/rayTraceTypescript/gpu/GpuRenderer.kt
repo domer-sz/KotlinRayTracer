@@ -16,10 +16,15 @@ import java.nio.file.Path
 class GpuRenderer : Renderer {
 
     override fun render(world: Hittable, setup: CameraSetup, outputPath: Path): Long {
-        val flattenStart = System.nanoTime()
-        val scene = SceneFlattener.flatten(world, setup.lights)
-        val flattenMs = (System.nanoTime() - flattenStart) / 1_000_000
-        System.err.println("[gpu] flatten $flattenMs ms (${scene.nodeCount} nodes, depth ${scene.maxDepth})")
+        val layoutStart = System.nanoTime()
+        val scene = SceneFlattener.scene(world, setup.lights)
+        val layoutMs = (System.nanoTime() - layoutStart) / 1_000_000
+        // The CUDA kernel's own tree is not in this: it is built when a card on that engine asks.
+        val laid = scene.instanced
+        System.err.println(
+            "[gpu] scene laid out in $layoutMs ms (${laid.instances.size} placed meshes, ${laid.sceneTriangles} triangles, " +
+                "${laid.sceneQuads.size} quads, ${laid.sceneSpheres.size} spheres, ${laid.mediumCount} volumes)"
+        )
         val denoiser = requestedDenoiser()
 
         GpuSession.open(scene, setup.totalPixels).use { session ->

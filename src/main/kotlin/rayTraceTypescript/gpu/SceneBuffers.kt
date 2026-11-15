@@ -64,31 +64,45 @@ class SceneBuffers(
      */
     fun kernelDefines(): String {
         val kinds = refs.filterIndexed { i, _ -> i % 2 == 0 }.toSet()
-        val materials = materialInts.filterIndexed { i, _ -> i % MATERIAL_INT_STRIDE == 0 }.toSet()
-        val textures = textureInts.filterIndexed { i, _ -> i % TEXTURE_INT_STRIDE == 0 }.toSet()
-        val moving = (0 until sphereCount).any { s ->
-            (3..5).any { spheres[s * SPHERE_STRIDE + it] != 0.0f }
-        }
-        val features = linkedMapOf(
-            "HAS_SPHERES" to (LEAF_SPHERE in kinds),
-            "HAS_TRIANGLES" to (LEAF_TRIANGLE in kinds),
-            "HAS_QUADS" to (LEAF_QUAD in kinds),
-            "HAS_MEDIA" to (LEAF_MEDIUM in kinds),
-            "HAS_MOTION" to moving,
-            "HAS_LIGHTS" to (lightCount > 0),
-            "TEX_CHECKER" to (1 in textures),
-            "TEX_IMAGE" to (2 in textures),
-            "TEX_NOISE" to (4 in textures),
-            "TEX_UVCHECKER" to (5 in textures),
-            "MAT_METAL" to (1 in materials),
-            "MAT_DIELECTRIC" to (2 in materials),
-            "MAT_EMISSIVE" to (3 in materials),
-            "MAT_ISOTROPIC" to (4 in materials)
+        return defines(
+            LEAF_SPHERE in kinds, LEAF_TRIANGLE in kinds, LEAF_QUAD in kinds, LEAF_MEDIUM in kinds,
+            spheres, lightCount > 0, materialInts, textureInts
         )
-        return features.entries.joinToString(" ") { (name, on) -> "-D$name=${if (on) 1 else 0}" }
     }
 
     companion object {
+        /**
+         * The kernel's feature switches for a scene that traces [spheres], [triangles], [quads]
+         * and [media] or not, whatever its layout: the rest is read off the tables themselves.
+         */
+        internal fun defines(
+            spheres: Boolean, triangles: Boolean, quads: Boolean, media: Boolean,
+            sphereData: FloatArray, lights: Boolean, materialInts: IntArray, textureInts: IntArray
+        ): String {
+            val materials = materialInts.filterIndexed { i, _ -> i % MATERIAL_INT_STRIDE == 0 }.toSet()
+            val textures = textureInts.filterIndexed { i, _ -> i % TEXTURE_INT_STRIDE == 0 }.toSet()
+            val moving = (0 until sphereData.size / SPHERE_STRIDE).any { s ->
+                (3..5).any { sphereData[s * SPHERE_STRIDE + it] != 0.0f }
+            }
+            val features = linkedMapOf(
+                "HAS_SPHERES" to spheres,
+                "HAS_TRIANGLES" to triangles,
+                "HAS_QUADS" to quads,
+                "HAS_MEDIA" to media,
+                "HAS_MOTION" to moving,
+                "HAS_LIGHTS" to lights,
+                "TEX_CHECKER" to (1 in textures),
+                "TEX_IMAGE" to (2 in textures),
+                "TEX_NOISE" to (4 in textures),
+                "TEX_UVCHECKER" to (5 in textures),
+                "MAT_METAL" to (1 in materials),
+                "MAT_DIELECTRIC" to (2 in materials),
+                "MAT_EMISSIVE" to (3 in materials),
+                "MAT_ISOTROPIC" to (4 in materials)
+            )
+            return features.entries.joinToString(" ") { (name, on) -> "-D$name=${if (on) 1 else 0}" }
+        }
+
         /** Ints per inner BVH node, see [BvhBuilder]. */
         const val NODE_INTS = 16
         const val SPHERE_STRIDE = 8

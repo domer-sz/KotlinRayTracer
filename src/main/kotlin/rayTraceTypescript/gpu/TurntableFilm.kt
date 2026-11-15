@@ -52,6 +52,43 @@ fun interface FilmProgress {
 }
 
 /**
+ * Where a film's frames spend their time, on average: the render thread readies the scene, traces
+ * the image and the guides, then waits until the worker has the frame before in the film; the
+ * worker denoises and encodes. A wait above zero means the worker sets the pace.
+ */
+internal class FrameTiming {
+    private var frames = 0
+    private var scene = 0L
+    private var trace = 0L
+    private var guides = 0L
+    private var wait = 0L
+    private val workerFrames = java.util.concurrent.atomic.AtomicInteger()
+    private val denoise = java.util.concurrent.atomic.AtomicLong()
+    private val encode = java.util.concurrent.atomic.AtomicLong()
+
+    fun renderThread(sceneNs: Long, traceNs: Long, guidesNs: Long, waitNs: Long) {
+        frames++
+        scene += sceneNs
+        trace += traceNs
+        guides += guidesNs
+        wait += waitNs
+    }
+
+    fun worker(denoiseNs: Long, encodeNs: Long) {
+        workerFrames.incrementAndGet()
+        denoise.addAndGet(denoiseNs)
+        encode.addAndGet(encodeNs)
+    }
+
+    fun summary(): String {
+        fun ms(total: Long, count: Int) = if (count == 0) 0 else total / count / 1_000_000
+        val w = workerFrames.get()
+        return "a frame on average: scene ${ms(scene, frames)} ms, trace ${ms(trace, frames)} ms, guides ${ms(guides, frames)} ms, " +
+            "waiting for the frame before ${ms(wait, frames)} ms; beside it, denoising ${ms(denoise.get(), w)} ms and encoding ${ms(encode.get(), w)} ms"
+    }
+}
+
+/**
  * Renders a turntable film frame by frame on the GPU and hands the frames to ffmpeg.
  *
  * Each frame is traced in slices of about [SLICE_MS] (well inside the display driver's two
@@ -91,16 +128,21 @@ object TurntableFilm {
         var pending: Future<*>? = null
         var finished = false
         val start = System.nanoTime()
+        // Where a frame's time goes: on this thread, and on the worker beside it.
+        val timing = FrameTiming()
         try {
             var baseSeed: Long? = null
             for (frame in 0 until frames) {
                 if (cancelled()) break
+                val sceneStart = System.nanoTime()
                 val session = sessionFor(frame)
+                val traceStart = System.nanoTime()
                 val seed = baseSeed ?: session.seed.also { baseSeed = it }
                 session.seed = seed + frame
                 session.setCamera(setup)
                 session.traceSliced(GpuSession.MODE_IMAGE, setup, settings.samples, GpuSession.IMAGE, SLICE_MS)
                 val image = FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.IMAGE, it) }
+                val guideStart = System.nanoTime()
                 val guides = denoiser?.let {
                     val guideSamples = minOf(settings.samples, GUIDE_SAMPLES)
                     fun guide(mode: Int): FloatArray {
@@ -109,20 +151,26 @@ object TurntableFilm {
                     }
                     guide(GpuSession.MODE_ALBEDO) to guide(GpuSession.MODE_NORMAL)
                 }
+                val waitStart = System.nanoTime()
                 // The frame before must be in the film before this one goes after it.
                 pending?.get()
+                timing.renderThread(traceStart - sceneStart, guideStart - traceStart, waitStart - guideStart, System.nanoTime() - waitStart)
                 if (frame > 0) progress.report(frame, frames, System.nanoTime() - start)
                 pending = worker.submit {
+                    val denoiseStart = System.nanoTime()
                     val clean = if (denoiser != null && guides != null) {
                         denoiser.denoise(width, height, image, guides.first, guides.second)
                     } else image
+                    val encodeStart = System.nanoTime()
                     encoder.write(clean)
+                    timing.worker(encodeStart - denoiseStart, System.nanoTime() - encodeStart)
                 }
             }
             pending?.get()
             if (cancelled()) return false
             progress.report(frames, frames, System.nanoTime() - start)
             encoder.finish(settings.turns)
+            System.err.println("\n[film] ${timing.summary()}")
             finished = true
             return true
         } finally {

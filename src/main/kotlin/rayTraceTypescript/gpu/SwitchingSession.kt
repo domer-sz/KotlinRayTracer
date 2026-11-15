@@ -9,7 +9,7 @@ import rayTraceTypescript.render.CameraSetup
  * is chosen anew each time the scene is replaced; changing it starts the outputs afresh, as a
  * new scene does for its callers anyway.
  */
-internal class SwitchingSession(private val device: GpuDevice, scene: SceneBuffers, private val maxPixels: Int) : GpuSession {
+internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, private val maxPixels: Int) : GpuSession {
     private var current: GpuSession = openFor(scene)
     private var camera: CameraSetup? = null
 
@@ -21,8 +21,8 @@ internal class SwitchingSession(private val device: GpuDevice, scene: SceneBuffe
 
     override val devices: List<String> get() = current.devices
 
-    override fun replaceScene(next: SceneBuffers) {
-        val wantsOptix = OptixSession.unsupported(next) == null
+    override fun replaceScene(next: GpuScene) {
+        val wantsOptix = OptixSession.unsupported(next.instanced) == null
         if (wantsOptix == (current is OptixSession)) {
             current.replaceScene(next)
             return
@@ -50,8 +50,8 @@ internal class SwitchingSession(private val device: GpuDevice, scene: SceneBuffe
 
     override fun close() = current.close()
 
-    private fun openFor(scene: SceneBuffers): GpuSession {
-        val reason = OptixSession.unsupported(scene) ?: return OptixSession(scene, maxPixels, device)
+    private fun openFor(scene: GpuScene): GpuSession {
+        val reason = OptixSession.unsupported(scene.instanced) ?: return OptixSession(scene, maxPixels, device)
         System.err.println("[gpu] ${device.shortName} traces with the CUDA kernel: $reason")
         return CudaSession(scene, maxPixels, device)
     }

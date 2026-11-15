@@ -28,7 +28,7 @@ interface GpuSession : AutoCloseable {
      * Swaps the scene for [next]: its buffers replace the old ones, and the kernels are kept -
      * only pointed at the new buffers - unless [next] needs other features compiled in.
      */
-    fun replaceScene(next: SceneBuffers)
+    fun replaceScene(next: GpuScene)
 
     /** Points the camera at [setup]; the next launch shoots rays from there. */
     fun setCamera(setup: CameraSetup)
@@ -113,14 +113,14 @@ interface GpuSession : AutoCloseable {
          * In `all`, a card that cannot be started is left out with a message, as long as one is
          * left; a card named outright that fails is an error.
          */
-        fun open(scene: SceneBuffers, maxPixels: Int, choice: GpuChoice = GpuChoice.fromProperties()): GpuSession {
+        fun open(scene: GpuScene, maxPixels: Int, choice: GpuChoice = GpuChoice.fromProperties()): GpuSession {
             val picks = choice.resolve(CudaContext.devices(), rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason())
             if (picks.size == 1) return openOn(picks.single(), scene, maxPixels)
             return MultiGpuSession.open(picks, scene, maxPixels, lenient = choice.gpus.trim().lowercase() == GpuChoice.ALL)
         }
 
         /** A session on one card, for the calling thread. */
-        internal fun openOn(pick: GpuPick, scene: SceneBuffers, maxPixels: Int): GpuSession = when {
+        internal fun openOn(pick: GpuPick, scene: GpuScene, maxPixels: Int): GpuSession = when {
             pick.engine == Engine.CUDA -> CudaSession(scene, maxPixels, pick.device)
             pick.fallback -> SwitchingSession(pick.device, scene, maxPixels)
             else -> rayTraceTypescript.gpu.optix.OptixSession(scene, maxPixels, pick.device)

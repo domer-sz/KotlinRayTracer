@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import rayTraceTypescript.gpu.GpuSession
 import rayTraceTypescript.gpu.MultiGpuSession
-import rayTraceTypescript.gpu.SceneBuffers
+import rayTraceTypescript.gpu.GpuScene
 import rayTraceTypescript.gpu.SceneFlattener
 import rayTraceTypescript.materials.Lambertian
 import rayTraceTypescript.objects.Sphere
@@ -197,7 +197,7 @@ class MultiGpuSessionTest {
 
     private fun session(vararg cards: FakeCard): GpuSession = MultiGpuSession.of(cards.map { card -> card.name to { card as GpuSession } })
 
-    private fun scene(): SceneBuffers = SceneFlattener.flatten(Sphere(Point(0f, 0f, 0f), 1f, Lambertian(Color(0.5f, 0.5f, 0.5f))))
+    private fun scene(): GpuScene = SceneFlattener.scene(Sphere(Point(0f, 0f, 0f), 1f, Lambertian(Color(0.5f, 0.5f, 0.5f))))
 
     /** A card that takes [msPerSample] for a sample and adds (sample + 1) * scale to every pixel. */
     private inner class FakeCard(
@@ -211,7 +211,7 @@ class MultiGpuSessionTest {
         override var seed = 0L
         override val devices = listOf(name)
 
-        override fun replaceScene(next: SceneBuffers) = Thread.sleep(loadMs)
+        override fun replaceScene(next: GpuScene) = Thread.sleep(loadMs)
 
         override fun setCamera(setup: CameraSetup) {}
 

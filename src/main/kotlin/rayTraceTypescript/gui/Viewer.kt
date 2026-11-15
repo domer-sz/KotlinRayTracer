@@ -688,7 +688,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             GpuRenderer.requestedDenoiser().use { denoiser ->
                 val open = { pixels: Int ->
                     val start = System.nanoTime()
-                    val buffers = SceneFlattener.flatten(buildWorld(), activeLights())
+                    val buffers = SceneFlattener.scene(buildWorld(), activeLights())
                     val flattened = System.nanoTime()
                     val current = session
                     val choice = gpuChoice

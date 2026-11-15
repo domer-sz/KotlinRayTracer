@@ -12,20 +12,32 @@ import rayTraceTypescript.gpu.GpuDevice
 import rayTraceTypescript.gpu.GpuKeepAwake
 import rayTraceTypescript.gpu.GpuPick
 import rayTraceTypescript.gpu.GpuRenderer
+import rayTraceTypescript.gpu.GpuScene
 import rayTraceTypescript.gpu.GpuSession
+import rayTraceTypescript.gpu.InstancedScene
+import rayTraceTypescript.gpu.MeshBlock
 import rayTraceTypescript.gpu.SceneBuffers
 import rayTraceTypescript.render.CameraSetup
 import java.nio.ByteBuffer
 import java.nio.FloatBuffer
+import java.util.Collections
+import java.util.IdentityHashMap
 
 /**
  * The OptiX backend of [GpuSession]: the kernel CudaSession runs, built as an OptiX program
- * (-DRT_OPTIX=1), with the scene's surfaces in a tree OptiX builds and searches - with the
- * card's RT cores where it has them. Sampling, materials and textures are the same code.
+ * (-DRT_OPTIX=1), with the scene's surfaces in trees OptiX builds and searches - with the card's
+ * RT cores where it has them. Sampling, materials and textures are the same code.
  *
- * As yet it takes triangles and quads; a scene with spheres or fog is refused with the reason.
+ * The scene comes as [InstancedScene]: each placed mesh is a tree of its own, built on the card
+ * the first time a scene holds that mesh and kept while scenes go on holding it, and the scene is
+ * a small tree of instances above them - one per placed mesh, where it stands, and one for the
+ * scene's loose triangles and quads. Moving, turning or resizing a model, a film's every frame,
+ * then rebuilds only that small tree.
+ *
+ * As yet it takes triangles, quads and placed meshes; a scene with spheres or fog is refused
+ * with the reason.
  */
-internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: Int, device: GpuDevice) : GpuSession {
+internal class OptixSession(initial: GpuScene, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
     private val cuda = CudaContext.create(device)
     override val devices: List<String> = listOf(GpuPick(device, Engine.OPTIX).toString())
@@ -42,17 +54,25 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
     private val staging: FloatBuffer = MemoryUtil.memAllocFloat(maxOf(maxPixels * 3, GpuSession.CAMERA_FLOATS))
 
     private lateinit var layout: OptixLayout
+    private lateinit var accel: OptixAccel
     private var context = 0L
     private var cameraBuffer = 0L
     private var paramsBuffer = 0L
     private var outputs: List<Long> = emptyList()
 
-    private var scene = initialScene
+    /** A placed mesh on this card: its triangles as loaded, its faces' palette entries, and its tree. */
+    private class BlockOnCard(val vertices: Long, val faces: Long, val tree: OptixAccel.Tree)
+    private val blocks = IdentityHashMap<MeshBlock, BlockOnCard>()
+
+    private var scene: InstancedScene = initial.instanced
     /** The feature switches the pipelines were built with. */
-    private var defines = initialScene.kernelDefines()
+    private var defines = scene.kernelDefines()
     private var sceneArguments: List<Long> = emptyList()
-    private var tree: OptixAccel.Tree? = null
+    private var loose: OptixAccel.Tree? = null
+    private var top: OptixAccel.Tree? = null
     private var quadIds = 0L
+    private var instanceTable = 0L
+    private var palette = 0L
     private var quadInput = -1
 
     /** One mode's programs, linked, with the table that tells OptiX which program serves what. */
@@ -63,24 +83,25 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
             OptixApi.unavailabilityReason()?.let { throw OptixException(it) }
             layout = OptixLayout.of(cuda)
             context = createContext()
+            accel = OptixAccel(layout, context)
             cameraBuffer = DeviceMemory.allocate(GpuSession.CAMERA_FLOATS * 4L).also { sessionMemory += it }
             paramsBuffer = DeviceMemory.allocate(PARAMS_BYTES.toLong()).also { sessionMemory += it }
             // Read as well as written: every slice of samples after the first adds to it.
             outputs = List(2) { DeviceMemory.allocate(maxPixels * 3L * Float.SIZE_BYTES).also { sessionMemory += it } }
-            load(initialScene)
+            load(scene)
         } catch (t: Throwable) {
             close()
             throw t
         }
     }
 
-    override fun replaceScene(next: SceneBuffers) {
+    override fun replaceScene(next: GpuScene) {
         cuda.makeCurrent()
         CudaContext.check(cuCtxSynchronize(), "cuCtxSynchronize")
         releaseScene()
-        scene = next
-        load(next)
-        val nextDefines = next.kernelDefines()
+        scene = next.instanced
+        load(scene)
+        val nextDefines = scene.kernelDefines()
         if (nextDefines != defines) {
             releasePipelines()
             defines = nextDefines
@@ -100,9 +121,11 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
         // The kernel's Params: pointers and 64-bit numbers first, then the 32-bit ones.
         paramsHost.clear()
         sceneArguments.forEach { paramsHost.putLong(it) }
-        paramsHost.putLong(outputs[target]).putLong(quadIds).putLong(tree!!.handle).putLong(seed)
+        paramsHost.putLong(outputs[target]).putLong(quadIds).putLong(instanceTable).putLong(palette)
+            .putLong(top!!.handle).putLong(seed)
+        // The root node is the CUDA kernel's: OptiX searches its own trees.
         paramsHost.putInt(setup.imageWidth).putInt(setup.imageHeight).putInt(sampleStart).putInt(count)
-            .putInt(setup.maxReflectionDepth).putFloat(scale).putInt(scene.rootNode).putInt(scene.lightCount).putInt(quadInput)
+            .putInt(setup.maxReflectionDepth).putFloat(scale).putInt(0).putInt(scene.lightCount).putInt(quadInput)
         check(paramsHost.position() == PARAMS_BYTES - PARAMS_PADDING) { "Params is ${paramsHost.position()} bytes, the kernel expects ${PARAMS_BYTES - PARAMS_PADDING}" }
         DeviceMemory.write(paramsBuffer, paramsHost)
 
@@ -137,6 +160,8 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
             cuda.makeCurrent()
             releasePipelines()
             releaseScene()
+            blocks.values.forEach { release(it) }
+            blocks.clear()
             sessionMemory.forEach { DeviceMemory.free(it) }
             if (context != 0L) OptixApi.call("optixDeviceContextDestroy", context)
         } finally {
@@ -155,15 +180,22 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
         out { OptixApi.call("optixDeviceContextCreate", cuda.context, options.address, it) }
     }
 
-    /** Uploads [s] and builds the tree over its triangles and quads. */
-    private fun load(s: SceneBuffers) {
+    /** Uploads [s], builds the trees of meshes new to this card, and the tree of the scene above them. */
+    private fun load(s: InstancedScene) {
         unsupported(s)?.let { throw OptixUnsupportedScene(it) }
         fun keep(pointer: Long) = pointer.also { sceneMemory += it }
-        // The kernel's buffers, in the order of its Params. The CUDA kernel's own tree
-        // (nodes, leaves, refs) is not read here: OptiX searches its own.
+
+        // The meshes: a mesh no scene holds any longer goes, one new to this card gets its tree.
+        val held: MutableSet<MeshBlock> = Collections.newSetFromMap(IdentityHashMap())
+        s.instances.forEach { held += it.block }
+        blocks.keys.filter { it !in held }.forEach { gone -> blocks.remove(gone)?.let { release(it) } }
+        held.filter { it !in blocks }.forEach { blocks[it] = upload(it) }
+
+        // The kernel's buffers, in the order of its Params. The node buffers carry the trees of
+        // the volumes' boundaries, the only ones the kernel searches itself.
         sceneArguments = listOf(
             cameraBuffer,
-            keep(DeviceMemory.allocate(0)), keep(DeviceMemory.allocate(0)), keep(DeviceMemory.allocate(0)),
+            keep(DeviceMemory.upload(s.boundaryNodes)), keep(DeviceMemory.upload(s.boundaryLeaves)), keep(DeviceMemory.upload(s.boundaryRefs)),
             keep(DeviceMemory.upload(s.spheres)), keep(DeviceMemory.upload(s.sphereMaterials)),
             keep(DeviceMemory.upload(s.triangles)), keep(DeviceMemory.upload(s.triangleMaterials)),
             keep(DeviceMemory.upload(s.quads)), keep(DeviceMemory.upload(s.quadMaterials)),
@@ -174,10 +206,12 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
             keep(DeviceMemory.upload(s.perlinVectors)), keep(DeviceMemory.upload(s.perlinPermutations))
         )
 
-        // Triangles as the kernel keeps them (first vertex, two edges), turned into three vertices.
+        // The loose surfaces: the scene's own triangles - as the kernel keeps them, first vertex
+        // and two edges, turned into three vertices - and its quads, two triangles each. The
+        // tables hold more (the lights' stand-ins, the volumes' boundaries), which no ray may hit.
         val stride = SceneBuffers.TRIANGLE_STRIDE
-        val triangleVertices = FloatArray(s.triangleCount * 9)
-        for (t in 0 until s.triangleCount) {
+        val triangleVertices = FloatArray(s.sceneTriangles * 9)
+        for (t in 0 until s.sceneTriangles) {
             for (axis in 0 until 3) {
                 val v0 = s.triangles[t * stride + axis]
                 triangleVertices[t * 9 + axis] = v0
@@ -185,11 +219,8 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
                 triangleVertices[t * 9 + 6 + axis] = v0 + s.triangles[t * stride + 8 + axis]
             }
         }
-        // The quads that are surfaces of the scene, each as two triangles. The quad buffer also
-        // holds the lights' stand-ins for sampling, which no ray may hit a second time.
-        val sceneQuads = (0 until s.refs.size step 2).filter { s.refs[it] == SceneBuffers.LEAF_QUAD }.map { s.refs[it + 1] }.toIntArray()
-        val quadVertices = FloatArray(sceneQuads.size * 18)
-        sceneQuads.forEachIndexed { k, quad ->
+        val quadVertices = FloatArray(s.sceneQuads.size * 18)
+        s.sceneQuads.forEachIndexed { k, quad ->
             val at = quad * SceneBuffers.QUAD_STRIDE
             // Corner Q, then Q + u, Q + u + v and Q + v.
             QUAD_CORNERS.forEachIndexed { corner, (u, v) ->
@@ -198,15 +229,93 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
                 }
             }
         }
-        quadIds = keep(DeviceMemory.upload(sceneQuads))
+        quadIds = keep(DeviceMemory.upload(s.sceneQuads))
         val sets = listOf(triangleVertices, quadVertices).filter { it.isNotEmpty() }
         quadInput = if (quadVertices.isEmpty()) -1 else sets.size - 1
-        tree = OptixAccel(layout, context).triangles(sets)
+        loose = if (sets.isEmpty()) null else accel.triangles(sets)
+
+        // What shading needs to know of each placed mesh (the kernel's Instance), and the
+        // materials of the meshes' own palettes, one after another.
+        val paletteEntries = ArrayList<Int>()
+        val table = MemoryUtil.memCalloc(INSTANCE_BYTES * maxOf(s.instances.size, 1))
+        try {
+            s.instances.forEach { instance ->
+                val onCard = blocks.getValue(instance.block)
+                val own = instance.palette ?: IntArray(0)
+                table.putLong(onCard.vertices).putLong(if (own.isEmpty()) 0L else onCard.faces)
+                    .putInt(instance.material).putInt(paletteEntries.size).putInt(own.size)
+                    .putFloat(instance.cos).putFloat(instance.sin).putInt(0)
+                own.forEach { paletteEntries += it }
+            }
+            instanceTable = keep(DeviceMemory.upload(table))
+        } finally {
+            MemoryUtil.memFree(table)
+        }
+        palette = keep(DeviceMemory.upload(paletteEntries.toIntArray()))
+
+        // The tree of the scene: one instance per placed mesh, where it stands, hits going to
+        // the mesh program (the first hit record); and one for the loose surfaces, unmoved,
+        // whose two inputs take the records after it.
+        val count = s.instances.size + if (loose != null) 1 else 0
+        layout.struct("OptixInstance", count).use { records ->
+            s.instances.forEachIndexed { i, instance ->
+                // A point p of the mesh goes to scale * turn(p) + offset, turning as PlacedMesh does:
+                // x' = (c x + s z) k + o.x, y' = k y + o.y, z' = (-s x + c z) k + o.z.
+                val k = instance.scale
+                val c = instance.cos
+                val n = instance.sin
+                val o = instance.offset
+                val matrix = floatArrayOf(c * k, 0f, n * k, o.x, 0f, k, 0f, o.y, -n * k, 0f, c * k, o.z)
+                matrix.forEachIndexed { e, value -> records.float("transform", value, i, e) }
+                records.int("instanceId", i, i).int("sbtOffset", 0, i).int("visibilityMask", 255, i)
+                    .int("flags", layout.constant("OPTIX_INSTANCE_FLAG_NONE").toInt(), i)
+                    .long("traversableHandle", blocks.getValue(instance.block).tree.handle, i)
+            }
+            loose?.let { tree ->
+                val i = s.instances.size
+                IDENTITY.forEachIndexed { e, value -> records.float("transform", value, i, e) }
+                records.int("instanceId", i, i).int("sbtOffset", 1, i).int("visibilityMask", 255, i)
+                    .int("flags", layout.constant("OPTIX_INSTANCE_FLAG_NONE").toInt(), i)
+                    .long("traversableHandle", tree.handle, i)
+            }
+            val onCard = keep(DeviceMemory.upload(records.memory))
+            top = accel.instances(onCard, count)
+        }
+    }
+
+    /** A mesh's triangles, as loaded and in the file's order, and a tree over them, on this card. */
+    private fun upload(block: MeshBlock): BlockOnCard {
+        val start = System.nanoTime()
+        val mesh = block.mesh
+        // The mesh's own order, not the CUDA kernel's leaf order: OptiX numbers the triangles as given.
+        val vertices = DeviceMemory.upload(mesh.vertices)
+        var faces = 0L
+        try {
+            faces = mesh.faceMaterials?.takeIf { mesh.hasColours }?.let { DeviceMemory.upload(it) } ?: 0L
+            val tree = accel.trianglesOnCard(listOf(vertices to block.triangleCount))
+            System.err.println(
+                "[gpu] built the tree of a ${block.triangleCount}-triangle mesh on ${cuda.deviceName} (OptiX) in " +
+                    "${(System.nanoTime() - start) / 1_000_000} ms, ${tree.bytes / (1 shl 20)} MB"
+            )
+            return BlockOnCard(vertices, faces, tree)
+        } catch (t: Throwable) {
+            DeviceMemory.free(vertices)
+            DeviceMemory.free(faces)
+            throw t
+        }
+    }
+
+    private fun release(block: BlockOnCard) {
+        DeviceMemory.free(block.tree.memory)
+        DeviceMemory.free(block.vertices)
+        DeviceMemory.free(block.faces)
     }
 
     private fun releaseScene() {
-        tree?.let { DeviceMemory.free(it.memory) }
-        tree = null
+        loose?.let { DeviceMemory.free(it.memory) }
+        loose = null
+        top?.let { DeviceMemory.free(it.memory) }
+        top = null
         sceneMemory.forEach { DeviceMemory.free(it) }
         sceneMemory.clear()
     }
@@ -223,7 +332,7 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
         val compiled = System.nanoTime()
         val moduleOptions = layout.struct("OptixModuleCompileOptions")
         val pipelineOptions = layout.struct("OptixPipelineCompileOptions")
-            .int("traversableGraphFlags", layout.constant("OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS").toInt())
+            .int("traversableGraphFlags", layout.constant("OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING").toInt())
             .int("numPayloadValues", PAYLOAD_VALUES)
             .int("numAttributeValues", 2)
             .long("pipelineLaunchParamsVariableName", name("params"))
@@ -246,8 +355,10 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
                 .long("raygen.module", module, RAYGEN).long("raygen.entryFunctionName", name("__raygen__render"), RAYGEN)
             descriptions.int("kind", layout.constant("OPTIX_PROGRAM_GROUP_KIND_MISS").toInt(), MISS)
                 .long("miss.module", module, MISS).long("miss.entryFunctionName", name("__miss__nothing"), MISS)
-            descriptions.int("kind", layout.constant("OPTIX_PROGRAM_GROUP_KIND_HITGROUP").toInt(), HIT)
-                .long("hitgroup.moduleCH", module, HIT).long("hitgroup.entryFunctionNameCH", name("__closesthit__surface"), HIT)
+            descriptions.int("kind", layout.constant("OPTIX_PROGRAM_GROUP_KIND_HITGROUP").toInt(), HIT_MESH)
+                .long("hitgroup.moduleCH", module, HIT_MESH).long("hitgroup.entryFunctionNameCH", name("__closesthit__mesh"), HIT_MESH)
+            descriptions.int("kind", layout.constant("OPTIX_PROGRAM_GROUP_KIND_HITGROUP").toInt(), HIT_SURFACE)
+                .long("hitgroup.moduleCH", module, HIT_SURFACE).long("hitgroup.entryFunctionNameCH", name("__closesthit__surface"), HIT_SURFACE)
             OptixApi.callWithLog("optixProgramGroupCreate") { log, logSize ->
                 arrayOf(context, descriptions.address, GROUPS, groupOptions.address, log, logSize, MemoryUtil.memAddress(groupHandles))
             }
@@ -267,19 +378,21 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
             }
             fun need(field: String) = needs[field] ?: 0
             val continuation = need("cssRG") + maxOf(maxOf(need("cssCH"), need("cssMS")), need("cssIS") + need("cssAH"))
-            // A tree of the scene alone: rays cross one level.
-            OptixApi.call("optixPipelineSetStackSize", linked, 0, 0, continuation, 1)
+            // Instances over meshes: rays cross two levels.
+            OptixApi.call("optixPipelineSetStackSize", linked, 0, 0, continuation, 2)
 
-            // The table: one record each for ray generation and miss, and one per input of the
-            // tree for hits - all served by the same hit program. The records carry no data.
+            // The table: one record each for ray generation and miss; for hits, the mesh program's
+            // record, then the surface program's for each input of the loose surfaces' tree.
+            // The records carry no data.
             val header = layout.constant("OPTIX_SBT_RECORD_HEADER_SIZE").toInt()
-            val hits = 2
+            val hits = 3
             val host = MemoryUtil.memCalloc(header * (2 + hits))
             val records = try {
                 val base = MemoryUtil.memAddress(host)
                 OptixApi.call("optixSbtRecordPackHeader", groups[RAYGEN], base)
                 OptixApi.call("optixSbtRecordPackHeader", groups[MISS], base + header)
-                for (h in 0 until hits) OptixApi.call("optixSbtRecordPackHeader", groups[HIT], base + header * (2L + h))
+                OptixApi.call("optixSbtRecordPackHeader", groups[HIT_MESH], base + header * 2L)
+                for (h in 1 until hits) OptixApi.call("optixSbtRecordPackHeader", groups[HIT_SURFACE], base + header * (2L + h))
                 DeviceMemory.upload(host)
             } finally {
                 MemoryUtil.memFree(host)
@@ -332,29 +445,30 @@ internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: I
 
     companion object {
         /** Why the OptiX engine cannot trace [scene] - what it holds that is not built yet - or null when it can. */
-        fun unsupported(scene: SceneBuffers): String? {
-            val kinds = (0 until scene.refs.size step 2).map { scene.refs[it] }.toSet()
-            return when {
-                SceneBuffers.LEAF_SPHERE in kinds || SceneBuffers.LEAF_MEDIUM in kinds ->
-                    "the OptiX engine does not trace spheres or fog yet"
-                SceneBuffers.LEAF_TRIANGLE !in kinds && SceneBuffers.LEAF_QUAD !in kinds ->
-                    "the scene has nothing the OptiX engine can trace"
-                else -> null
-            }
+        fun unsupported(scene: InstancedScene): String? = when {
+            scene.sceneSpheres.isNotEmpty() || scene.mediumCount > 0 -> "the OptiX engine does not trace spheres or fog yet"
+            scene.sceneTriangles == 0 && scene.sceneQuads.isEmpty() && scene.instances.isEmpty() ->
+                "the scene has nothing the OptiX engine can trace"
+            else -> null
         }
 
-        /** The kernel's Params: 24 pointers and 64-bit numbers, 9 numbers of 32 bits, padded to a multiple of 8. */
+        /** The kernel's Params: 26 pointers and 64-bit numbers, 9 numbers of 32 bits, padded to a multiple of 8. */
         private const val PARAMS_PADDING = 4
-        private const val PARAMS_BYTES = 24 * 8 + 9 * 4 + PARAMS_PADDING
-        /** What a hit hands back: kind, index, distance and the two surface coordinates. */
-        private const val PAYLOAD_VALUES = 5
-        private const val GROUPS = 3
+        private const val PARAMS_BYTES = 26 * 8 + 9 * 4 + PARAMS_PADDING
+        /** The kernel's Instance: two pointers, then six numbers of 32 bits. */
+        private const val INSTANCE_BYTES = 2 * 8 + 6 * 4
+        /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance. */
+        private const val PAYLOAD_VALUES = 6
+        private const val GROUPS = 4
         private const val RAYGEN = 0
         private const val MISS = 1
-        private const val HIT = 2
+        private const val HIT_MESH = 2
+        private const val HIT_SURFACE = 3
         private val STACK_FIELDS = listOf("cssRG", "cssMS", "cssCH", "cssAH", "cssIS", "cssCC", "dssDC")
         /** A quad as two triangles, in units of its two edges: Q, Q+u, Q+u+v and Q, Q+u+v, Q+v. */
         private val QUAD_CORNERS = listOf(0f to 0f, 1f to 0f, 1f to 1f, 0f to 0f, 1f to 1f, 0f to 1f)
+        /** A 3x4 matrix, rows first, that leaves everything where it is. */
+        private val IDENTITY = floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f)
         // The CUDA kernel's options, without its register cap: OptiX finishes the code itself.
         private val BUILD_OPTIONS = listOf("--use_fast_math", "--std=c++17")
     }

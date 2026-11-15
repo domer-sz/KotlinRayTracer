@@ -40,14 +40,14 @@ object TurntableRender {
                 "$frames frames (${settings.seconds} s at ${settings.fps} fps) x ${settings.turns}, ${settings.samples} spp -> $output"
         )
 
-        fun buffersAt(frame: Int): SceneBuffers {
+        fun buffersAt(frame: Int): GpuScene {
             val degrees = settings.degrees(frame)
             val swaps = java.util.IdentityHashMap<Hittable, Hittable>()
             for (part in turning) {
                 swaps[part.hittable] = Placement.turned(part.hittable, axisX, axisZ, degrees)
                 part.lightProxy?.let { swaps[it] = Placement.turned(it, axisX, axisZ, degrees) }
             }
-            return SceneFlattener.flatten(swapped(scene.world, swaps), camera.lights?.let { swapped(it, swaps) })
+            return SceneFlattener.scene(swapped(scene.world, swaps), camera.lights?.let { swapped(it, swaps) })
         }
 
         val denoiser = GpuRenderer.requestedDenoiser()

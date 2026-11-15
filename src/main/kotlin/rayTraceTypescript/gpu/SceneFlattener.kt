@@ -37,8 +37,17 @@ class SceneFlattener private constructor() {
     private val bvh = BvhBuilder()
 
     companion object {
+        /** [world] as the CUDA kernel traces it: one tree over everything, placed meshes pasted in. */
         fun flatten(world: Hittable, lights: Hittable? = null): SceneBuffers =
             SceneFlattener().build(world, lights)
+
+        /**
+         * [world] made ready for whichever engine traces it. The layout with placed meshes as
+         * instances is worked out here and now - it is cheap, and it is where an object the GPU
+         * cannot render is found out; the CUDA kernel's, when an engine first asks for it.
+         */
+        fun scene(world: Hittable, lights: Hittable? = null): GpuScene =
+            GpuScene(InstancedScene.of(world, lights)) { flatten(world, lights) }
     }
 
     private fun build(world: Hittable, lightSources: Hittable?): SceneBuffers {
@@ -95,9 +104,7 @@ class SceneFlattener private constructor() {
                     hittable.material
                 )
                 val index = triangleMaterials.size
-                for (v in listOf(triangle.v0, triangle.edge1, triangle.edge2)) {
-                    triangles.add(v.x); triangles.add(v.y); triangles.add(v.z); triangles.add(0.0f)
-                }
+                triangles.addTriangle(triangle)
                 triangleMaterials.add(registerMaterial(triangle.material))
                 val box = triangle.aabbBoundingBox()
                 refs.add(SceneBuffers.LEAF_TRIANGLE, index, box.x.min, box.y.min, box.z.min, box.x.max, box.y.max, box.z.max)
@@ -249,12 +256,7 @@ class SceneFlattener private constructor() {
         else Quad(transform.point(original.q), transform.vector(original.u), transform.vector(original.v), original.material)
 
         val index = quadMaterials.size
-        for (vector in listOf(quad.q, quad.u, quad.v, quad.w, quad.normal)) {
-            quads.add(vector.x)
-            quads.add(vector.y)
-            quads.add(vector.z)
-        }
-        quads.add(quad.d)
+        quads.addQuad(quad)
         quadMaterials.add(registerMaterial(quad.material))
         return index to quad
     }
@@ -266,19 +268,44 @@ class SceneFlattener private constructor() {
         val start = transform.point(sphere.center.origin)
         val end = transform.point(sphere.center.at(1.0f))
 
-        spheres.add(start.x)
-        spheres.add(start.y)
-        spheres.add(start.z)
-        spheres.add(end.x - start.x)
-        spheres.add(end.y - start.y)
-        spheres.add(end.z - start.z)
-        spheres.add(sphere.radius)
-        spheres.add(0.0f)
+        spheres.addSphere(start, end, sphere.radius)
         sphereMaterials.add(registerMaterial(sphere.material))
         return Triple(sphereIndex, start, end)
     }
 
     private fun registerMaterial(material: Material): Int = materials.register(material)
+}
+
+/** Writes [quad] as the kernel reads one: its corner, two edges, basis vector w, plane normal and plane offset. */
+internal fun FloatBuffer.addQuad(quad: Quad) {
+    for (vector in listOf(quad.q, quad.u, quad.v, quad.w, quad.normal)) {
+        add(vector.x)
+        add(vector.y)
+        add(vector.z)
+    }
+    add(quad.d)
+}
+
+/** Writes a sphere as the kernel reads one: its centre at time 0, how far that moves by time 1, the radius and a spare. */
+internal fun FloatBuffer.addSphere(start: Point, end: Point, radius: Float) {
+    add(start.x)
+    add(start.y)
+    add(start.z)
+    add(end.x - start.x)
+    add(end.y - start.y)
+    add(end.z - start.z)
+    add(radius)
+    add(0.0f)
+}
+
+/** Writes a triangle as the kernel reads one: its first vertex and its two edges, each padded to four floats. */
+internal fun FloatBuffer.addTriangle(triangle: Triangle) {
+    for (v in listOf(triangle.v0, triangle.edge1, triangle.edge2)) {
+        add(v.x)
+        add(v.y)
+        add(v.z)
+        add(0.0f)
+    }
 }
 
 /** A growable FloatArray: the scene can run to millions of floats, too many to box one by one. */

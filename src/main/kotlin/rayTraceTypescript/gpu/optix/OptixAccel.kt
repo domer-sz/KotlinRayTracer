@@ -22,35 +22,66 @@ internal class OptixAccel(private val layout: OptixLayout, private val context: 
      */
     fun triangles(vertexSets: List<FloatArray>): Tree {
         require(vertexSets.isNotEmpty() && vertexSets.all { it.isNotEmpty() && it.size % 9 == 0 }) { "Triangle sets of 9 floats a triangle" }
-        val count = vertexSets.size
-        val device = mutableListOf<Long>()
+        val device = vertexSets.map { DeviceMemory.upload(it) }
+        try {
+            return trianglesOnCard(device.zip(vertexSets.map { it.size / 9 }))
+        } finally {
+            // The tree keeps what it needs of the vertices; the buffers can go.
+            device.forEach { DeviceMemory.free(it) }
+        }
+    }
+
+    /** As [triangles], for sets already on the card: each its device address and its number of triangles. */
+    fun trianglesOnCard(sets: List<Pair<Long, Int>>): Tree {
+        require(sets.isNotEmpty() && sets.all { it.second > 0 }) { "Triangle sets that hold triangles" }
+        val count = sets.size
         // OptiX takes the address of an array of vertex buffers (one per motion key) per input.
         val vertexBuffers = MemoryUtil.memAllocLong(count)
         val geometryFlags = MemoryUtil.memAllocInt(1).put(0, layout.constant("OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT").toInt())
         val inputs = layout.struct("OptixBuildInput", count)
         try {
-            vertexSets.forEachIndexed { i, vertices ->
-                vertexBuffers.put(i, DeviceMemory.upload(vertices).also { device += it })
+            sets.forEachIndexed { i, (vertices, triangles) ->
+                vertexBuffers.put(i, vertices)
                 inputs.int("type", layout.constant("OPTIX_BUILD_INPUT_TYPE_TRIANGLES").toInt(), i)
                     .long("triangleArray.vertexBuffers", MemoryUtil.memAddress(vertexBuffers) + i * 8L, i)
-                    .int("triangleArray.numVertices", vertices.size / 3, i)
+                    .int("triangleArray.numVertices", triangles * 3, i)
                     .int("triangleArray.vertexFormat", layout.constant("OPTIX_VERTEX_FORMAT_FLOAT3").toInt(), i)
                     .int("triangleArray.vertexStrideInBytes", 12, i)
                     .long("triangleArray.flags", MemoryUtil.memAddress(geometryFlags), i)
                     .int("triangleArray.numSbtRecords", 1, i)
             }
             val flags = layout.constant("OPTIX_BUILD_FLAG_ALLOW_COMPACTION") or layout.constant("OPTIX_BUILD_FLAG_PREFER_FAST_TRACE")
-            return build(inputs, count, flags.toInt())
+            return build(inputs, count, flags.toInt(), compact = true)
         } finally {
-            device.forEach { DeviceMemory.free(it) }
             inputs.close()
             MemoryUtil.memFree(vertexBuffers)
             MemoryUtil.memFree(geometryFlags)
         }
     }
 
-    /** Builds a tree over [inputs] and, where that saves memory, moves it into a tighter block. */
-    private fun build(inputs: OptixStruct, count: Int, buildFlags: Int): Tree {
+    /**
+     * A tree over [count] instances: OptixInstance records on the card at [records], each a tree
+     * of its own and where it stands. Built for speed of building - there are few of them, and
+     * the tree is built again whenever anything moves.
+     */
+    fun instances(records: Long, count: Int): Tree {
+        require(count > 0) { "A tree of instances needs one at least" }
+        val inputs = layout.struct("OptixBuildInput")
+            .int("type", layout.constant("OPTIX_BUILD_INPUT_TYPE_INSTANCES").toInt())
+            .long("instanceArray.instances", records)
+            .int("instanceArray.numInstances", count)
+        try {
+            return build(inputs, 1, layout.constant("OPTIX_BUILD_FLAG_PREFER_FAST_BUILD").toInt(), compact = false)
+        } finally {
+            inputs.close()
+        }
+    }
+
+    /**
+     * Builds a tree over [inputs] and, with [compact] (which [buildFlags] must allow), moves it
+     * into a tighter block when that saves memory.
+     */
+    private fun build(inputs: OptixStruct, count: Int, buildFlags: Int, compact: Boolean): Tree {
         val options = layout.struct("OptixAccelBuildOptions")
             .int("buildFlags", buildFlags)
             .int("operation", layout.constant("OPTIX_BUILD_OPERATION_BUILD").toInt())
@@ -66,6 +97,14 @@ internal class OptixAccel(private val layout: OptixLayout, private val context: 
             val temporaryBytes = sizes.readLong("tempSizeInBytes")
             temporary = DeviceMemory.allocate(temporaryBytes)
             output = DeviceMemory.allocate(outputBytes)
+            if (!compact) {
+                OptixApi.call(
+                    "optixAccelBuild", context, 0L, options.address, inputs.address, count,
+                    temporary, temporaryBytes, output, outputBytes, MemoryUtil.memAddress(handle), 0L, 0
+                )
+                CudaContext.check(cuCtxSynchronize(), "optixAccelBuild (cuCtxSynchronize)")
+                return Tree(handle.get(0), output, outputBytes).also { output = 0L }
+            }
             compactedSize = DeviceMemory.allocate(8)
             emitted.long("result", compactedSize).int("type", layout.constant("OPTIX_PROPERTY_TYPE_COMPACTED_SIZE").toInt())
             OptixApi.call(

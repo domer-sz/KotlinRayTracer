@@ -60,6 +60,7 @@ __device__ inline float3 xyz(float4 a) { return make_float3(a.x, a.y, a.z); }
 #define LEAF_TRIANGLE (-2)
 #define LEAF_QUAD     (-3)
 #define LEAF_MEDIUM   (-4)
+#define LEAF_MESH     (-5)                   // a triangle of a placed mesh, which only OptiX keeps as an instance
 #define TRIANGLE_PARALLEL_EPSILON 1e-8f
 #define STACK_SIZE    64
 #define REJECTION_CAP 64
@@ -249,7 +250,73 @@ typedef struct {
     float v;
     int kind;                            // 0 while nothing has been hit
     int index;
+#if RT_OPTIX
+    int instance;                        // for LEAF_MESH: which placed mesh
+#endif
 } Closest;
+
+#if RT_OPTIX
+
+// A placed mesh: its triangles as it was loaded - nine floats each, three vertices in its own
+// space - the turn of its placement about the vertical, and what it is made of. Where it
+// stands is OptiX's business; shading only needs to turn a normal.
+struct Instance {
+    const float* vertices;
+    const int* faces;                    // each triangle's entry in the mesh's own palette, or null
+    int material;                        // the material of the mesh, and of a face not in the palette
+    int palette;                         // where this instance's entries start in Params.palette
+    int paletteCount;
+    float cosTurn;
+    float sinTurn;
+    int spare;
+};
+
+// What an OptiX launch is given: the scene's buffers, which the CUDA kernel takes as arguments,
+// the tree OptiX searches, and the launch's numbers. gpu/optix/OptixSession fills it; its
+// pointers and 64-bit numbers come first, so nothing is padded between the fields.
+struct Params {
+    const float* cam;
+    const float4* nodes;                 // the trees of the volumes' boundaries only
+    const int2* leaves;
+    const int2* refs;
+    const float* spheres;
+    const int* sphereMaterials;
+    const float4* triangles;
+    const int* triangleMaterials;
+    const float* quads;
+    const int* quadMaterials;
+    const int* mediumInts;
+    const float* mediumFloats;
+    const int* lights;
+    const int* matI;
+    const float* matF;
+    const int* texI;
+    const float* texF;
+    const unsigned char* images;
+    const float* perlinVectors;
+    const int* perlinPermutations;
+    float* out;
+    const int* quadIds;                  // the quad each pair of triangles in the tree stands for
+    const Instance* instances;
+    const int* palette;
+    OptixTraversableHandle handle;
+    unsigned long long seed;
+    int width;
+    int height;
+    int sampleStart;
+    int sampleCount;
+    int maxReflectionDepth;
+    float pixelSamplesScale;
+    int rootNode;
+    int lightCount;
+    int quadInput;                       // which input of the tree of loose surfaces holds the quads; -1 without any
+};
+
+extern "C" {
+__constant__ Params params;
+}
+
+#endif
 
 __device__ inline bool sphere_t(const Scene* sc, int index, float3 origin, float3 direction, float time,
                      float tMin, float tMax, float* tOut) {
@@ -499,6 +566,23 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
         const float* data = sc->quads + best->index * 16;
         outwardNormal = make_float3(data[12], data[13], data[14]);
         rec->material = sc->quadMaterials[best->index];
+#if RT_OPTIX
+    } else if (best->kind == LEAF_MESH) {
+        // The facet's normal from its winding, in the mesh's own space, then turned as the
+        // placement turns the mesh; its scale and offset leave a direction alone.
+        const Instance* placed = params.instances + best->instance;
+        const float* v = placed->vertices + best->index * 9;
+        float3 v0 = make_float3(v[0], v[1], v[2]);
+        float3 n = cross(make_float3(v[3], v[4], v[5]) - v0, make_float3(v[6], v[7], v[8]) - v0);
+        outwardNormal = make_float3(placed->cosTurn * n.x + placed->sinTurn * n.z, n.y,
+                                    -placed->sinTurn * n.x + placed->cosTurn * n.z);
+        outwardNormal = outwardNormal / length(outwardNormal);
+        rec->material = placed->material;
+        if (placed->faces) {
+            int entry = placed->faces[best->index];
+            if (entry >= 0 && entry < placed->paletteCount) rec->material = params.palette[placed->palette + entry];
+        }
+#endif
     } else {
         // Fog has no surface: the normal is arbitrary and the ray always counts as outside.
         rec->normal = make_float3(1.0f, 0.0f, 0.0f);
@@ -514,62 +598,21 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
 
 #if RT_OPTIX
 
-// What an OptiX launch is given: the scene's buffers, which the CUDA kernel takes as arguments,
-// the tree OptiX searches, and the launch's numbers. gpu/optix/OptixSession fills it; its
-// pointers and 64-bit numbers come first, so nothing is padded between the fields.
-struct Params {
-    const float* cam;
-    const float4* nodes;
-    const int2* leaves;
-    const int2* refs;
-    const float* spheres;
-    const int* sphereMaterials;
-    const float4* triangles;
-    const int* triangleMaterials;
-    const float* quads;
-    const int* quadMaterials;
-    const int* mediumInts;
-    const float* mediumFloats;
-    const int* lights;
-    const int* matI;
-    const float* matF;
-    const int* texI;
-    const float* texF;
-    const unsigned char* images;
-    const float* perlinVectors;
-    const int* perlinPermutations;
-    float* out;
-    const int* quadIds;                  // the quad each pair of triangles in the tree stands for
-    OptixTraversableHandle handle;
-    unsigned long long seed;
-    int width;
-    int height;
-    int sampleStart;
-    int sampleCount;
-    int maxReflectionDepth;
-    float pixelSamplesScale;
-    int rootNode;
-    int lightCount;
-    int quadInput;                       // which of the tree's inputs holds the quads; -1 without any
-};
-
-extern "C" {
-__constant__ Params params;
-}
-
-// The closest hit, asked of OptiX. It comes back in the ray's payload as the closest-hit program
-// at the end of this file fills it: what was hit, where along the ray, and a triangle's
-// barycentric coordinates - which are the u/v triangle_t reports.
+// The closest hit, asked of OptiX. It comes back in the ray's payload as the closest-hit
+// programs at the end of this file fill it: what was hit, where along the ray, a triangle's
+// barycentric coordinates - which are the u/v triangle_t reports - and, for a placed mesh,
+// which one.
 __device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float3 direction, float time,
                       float tMin, float tMax, Rng* rng, HitRecord* rec) {
-    unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u;
+    unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u, instance = 0u;
     optixTrace(params.handle, origin, direction, tMin, tMax, 0.0f, OptixVisibilityMask(255),
-               OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v);
+               OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v, instance);
     if (kind == 0u) return false;
 
     Closest found;
     found.kind = (int)kind;
     found.index = (int)index;
+    found.instance = (int)instance;
     found.t = __uint_as_float(t);
     found.u = __uint_as_float(u);
     found.v = __uint_as_float(v);
@@ -955,7 +998,18 @@ __device__ inline float light_pdf_value(const Scene* sc, const int* lights, int 
 
 #if RT_OPTIX
 
-// The hit OptiX settled on, for world_hit to read back.
+// The hit OptiX settled on, for world_hit to read back: a triangle of a placed mesh...
+extern "C" __global__ void __closesthit__mesh() {
+    float2 barycentrics = optixGetTriangleBarycentrics();
+    optixSetPayload_0((unsigned int)LEAF_MESH);
+    optixSetPayload_1(optixGetPrimitiveIndex());
+    optixSetPayload_2(__float_as_uint(optixGetRayTmax()));
+    optixSetPayload_3(__float_as_uint(barycentrics.x));
+    optixSetPayload_4(__float_as_uint(barycentrics.y));
+    optixSetPayload_5(optixGetInstanceId());
+}
+
+// ...or one of the scene's loose triangles or quads.
 extern "C" __global__ void __closesthit__surface() {
     unsigned int primitive = optixGetPrimitiveIndex();
     float2 barycentrics = optixGetTriangleBarycentrics();

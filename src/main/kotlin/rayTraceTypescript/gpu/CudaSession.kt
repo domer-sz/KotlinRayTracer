@@ -18,7 +18,7 @@ import java.nio.FloatBuffer
  * The CUDA backend of [GpuSession]: the scene's buffers in device memory, one module per kernel
  * mode compiled by NVRTC with the scene's features switched in, and the two outputs.
  */
-internal class CudaSession(initialScene: SceneBuffers, private val maxPixels: Int, device: GpuDevice) : GpuSession {
+internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
     private val cuda = CudaContext.create(device)
     override val devices: List<String> = listOf(GpuPick(device, Engine.CUDA).toString())
@@ -30,6 +30,8 @@ internal class CudaSession(initialScene: SceneBuffers, private val maxPixels: In
     private val kernels = HashMap<Int, Pair<Long, Long>>()
     override var seed: Long = GpuSession.initialSeed()
 
+    /** The scene in the kernel's own layout, one tree over everything; asking for it is what builds it. */
+    private val initialScene: SceneBuffers = initial.buffers
     private var scene = initialScene
     /** The feature switches the kernels were built with, and whether volumes need more registers. */
     private var defines = initialScene.kernelDefines()
@@ -53,7 +55,9 @@ internal class CudaSession(initialScene: SceneBuffers, private val maxPixels: In
         }
     }
 
-    override fun replaceScene(next: SceneBuffers) {
+    override fun replaceScene(next: GpuScene) = replaceScene(next.buffers)
+
+    private fun replaceScene(next: SceneBuffers) {
         cuda.makeCurrent()
         CudaContext.check(cuCtxSynchronize(), "cuCtxSynchronize")
         sceneMemory.forEach { cuMemFree(it) }

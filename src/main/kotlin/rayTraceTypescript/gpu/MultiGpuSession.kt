@@ -34,7 +34,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
     override var seed: Long = GpuSession.initialSeed()
 
     /** The scene the cards should hold, and its number: a card loads the newest when it gets to it. */
-    @Volatile private var wanted: Pair<Int, SceneBuffers>? = null
+    @Volatile private var wanted: Pair<Int, GpuScene>? = null
     private var sceneNumber = 0
     private var camera: CameraSetup? = null
 
@@ -44,7 +44,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
 
     override val devices: List<String> get() = cards.flatMap { it.devices() }
 
-    override fun replaceScene(next: SceneBuffers) {
+    override fun replaceScene(next: GpuScene) {
         val number = ++sceneNumber
         wanted = number to next
         cards.forEach { card -> card.post { card.loadScene(wanted) } }
@@ -433,7 +433,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
         }
 
         /** Loads [wanted] unless this card already holds it; a card that cannot load it sits the scene out. */
-        fun loadScene(wanted: Pair<Int, SceneBuffers>?) {
+        fun loadScene(wanted: Pair<Int, GpuScene>?) {
             val (number, scene) = wanted ?: return
             val held = session ?: return
             if (number == loadedScene) return
@@ -539,7 +539,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
          * [lenient], a card that cannot be opened is left out with a message as long as another
          * can; otherwise the first failure is thrown.
          */
-        fun open(picks: List<GpuPick>, scene: SceneBuffers, maxPixels: Int, lenient: Boolean): GpuSession =
+        fun open(picks: List<GpuPick>, scene: GpuScene, maxPixels: Int, lenient: Boolean): GpuSession =
             of(picks.map { pick -> pick.toString() to { GpuSession.openOn(pick, scene, maxPixels) } }, lenient)
 
         /** Cards made by [openers], each called on the thread that will own its session - also how tests put fakes in. */
