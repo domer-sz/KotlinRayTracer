@@ -40,13 +40,14 @@ import javax.imageio.ImageIO
  * with the same sample count; only the random streams differ, so the images are compared
  * statistically.
  *
- * The renderer's own CUDA kernel is what runs here; [OptixCpuComparisonTest] puts the same scenes
- * and the same yardstick to the OptiX engine.
+ * Here the renderer picks cards and engines as it does by default - every card, OptiX where it
+ * can. [SingleCardCpuComparisonTest] and [OptixCpuComparisonTest] put the same scenes and the
+ * same yardstick to one card on the CUDA kernel and to the OptiX engine.
  */
 open class GpuCpuComparisonTest {
 
-    /** The engine the renders go through (-Drt.backend); null leaves the renderer's default. */
-    protected open val backend: String? = null
+    /** The -Drt.gpus / -Drt.backend switches the renders run under; none leaves the defaults. */
+    protected open val settings: Map<String, String> = emptyMap()
 
     @Test
     fun `gpu matches the cpu render for every material`() {
@@ -200,8 +201,8 @@ open class GpuCpuComparisonTest {
 
     private fun render(renderer: Renderer, world: Hittable, camera: Camera, seed: Long): PpmSupport.PpmImage {
         val target: Path = Files.createTempFile("raytracer-backend-test", ".ppm")
-        val chosen = System.getProperty("rt.backend")
-        backend?.let { System.setProperty("rt.backend", it) }
+        val before = settings.keys.associateWith { System.getProperty(it) }
+        settings.forEach { (key, value) -> System.setProperty(key, value) }
         RandomSource.withSeed(seed)
         return try {
             renderer.render(world, camera.initialize(), target)
@@ -214,7 +215,7 @@ open class GpuCpuComparisonTest {
             Files.deleteIfExists(target)
             Files.deleteIfExists(PpmWriter.pngPath(target))
             RandomSource.reset()
-            if (chosen == null) System.clearProperty("rt.backend") else System.setProperty("rt.backend", chosen)
+            before.forEach { (key, value) -> if (value == null) System.clearProperty(key) else System.setProperty(key, value) }
         }
     }
 

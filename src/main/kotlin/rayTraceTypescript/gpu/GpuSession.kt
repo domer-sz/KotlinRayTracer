@@ -43,6 +43,15 @@ interface GpuSession : AutoCloseable {
     /** Copies the first [into].size floats of [target] back to the host. */
     fun read(target: Int, into: FloatArray)
 
+    /**
+     * Empties [target], so that a launch may add to it whatever sample it starts at. Cards that
+     * share an image need it: each traces some of the samples, and only one of them the first.
+     */
+    fun clear(target: Int)
+
+    /** The cards tracing and their engines, for a status line: "RTX 2060 (OptiX)". */
+    val devices: List<String>
+
     override fun close()
 
     /**
@@ -90,13 +99,26 @@ interface GpuSession : AutoCloseable {
         internal const val CAMERA_FLOATS = 23
 
         /**
-         * A session for [scene], with outputs for up to [maxPixels] pixels. -Drt.backend=optix
-         * traces through OptiX ([rayTraceTypescript.gpu.optix.OptixSession]) instead of the
-         * renderer's own CUDA kernel.
+         * A session for [scene], with outputs for up to [maxPixels] pixels, on the cards and with
+         * the engines [choice] names: by default every card, through OptiX where the card has RT
+         * cores and through the renderer's own CUDA kernel elsewhere. One card is driven directly;
+         * several share each image's samples ([MultiGpuSession]).
+         *
+         * In `all`, a card that cannot be started is left out with a message, as long as one is
+         * left; a card named outright that fails is an error.
          */
-        fun open(scene: SceneBuffers, maxPixels: Int): GpuSession =
-            if (System.getProperty("rt.backend") == "optix") rayTraceTypescript.gpu.optix.OptixSession(scene, maxPixels)
-            else CudaSession(scene, maxPixels)
+        fun open(scene: SceneBuffers, maxPixels: Int, choice: GpuChoice = GpuChoice.fromProperties()): GpuSession {
+            val picks = choice.resolve(CudaContext.devices(), rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason())
+            if (picks.size == 1) return openOn(picks.single(), scene, maxPixels)
+            return MultiGpuSession.open(picks, scene, maxPixels, lenient = choice.gpus.trim().lowercase() == GpuChoice.ALL)
+        }
+
+        /** A session on one card, for the calling thread. */
+        internal fun openOn(pick: GpuPick, scene: SceneBuffers, maxPixels: Int): GpuSession = when {
+            pick.engine == Engine.CUDA -> CudaSession(scene, maxPixels, pick.device)
+            pick.fallback -> SwitchingSession(pick.device, scene, maxPixels)
+            else -> rayTraceTypescript.gpu.optix.OptixSession(scene, maxPixels, pick.device)
+        }
 
         /** Null when a CUDA device and the kernel compiler are usable here, otherwise a short reason. */
         fun unavailabilityReason(): String? = CudaContext.unavailabilityReason()

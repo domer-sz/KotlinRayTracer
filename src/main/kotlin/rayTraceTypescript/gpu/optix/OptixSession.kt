@@ -3,10 +3,14 @@ package rayTraceTypescript.gpu.optix
 import org.lwjgl.cuda.CU.cuCtxSynchronize
 import org.lwjgl.cuda.CU.cuMemcpyDtoH
 import org.lwjgl.cuda.CU.cuMemcpyHtoD
+import org.lwjgl.cuda.CU.cuMemsetD32
 import org.lwjgl.system.MemoryUtil
 import rayTraceTypescript.gpu.CudaContext
 import rayTraceTypescript.gpu.DeviceMemory
+import rayTraceTypescript.gpu.Engine
+import rayTraceTypescript.gpu.GpuDevice
 import rayTraceTypescript.gpu.GpuKeepAwake
+import rayTraceTypescript.gpu.GpuPick
 import rayTraceTypescript.gpu.GpuRenderer
 import rayTraceTypescript.gpu.GpuSession
 import rayTraceTypescript.gpu.SceneBuffers
@@ -21,9 +25,10 @@ import java.nio.FloatBuffer
  *
  * As yet it takes triangles and quads; a scene with spheres or fog is refused with the reason.
  */
-internal class OptixSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSession {
+internal class OptixSession(initialScene: SceneBuffers, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
-    private val cuda = CudaContext.create()
+    private val cuda = CudaContext.create(device)
+    override val devices: List<String> = listOf(GpuPick(device, Engine.OPTIX).toString())
     override var seed: Long = GpuSession.initialSeed()
 
     /** Device memory kept for the session's life, and the scene's, freed when it is replaced. */
@@ -116,6 +121,12 @@ internal class OptixSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSes
         staging.get(into)
     }
 
+    override fun clear(target: Int) {
+        cuda.makeCurrent()
+        // All bits zero is 0.0f.
+        CudaContext.check(cuMemsetD32(outputs[target], 0, maxPixels * 3L), "cuMemsetD32")
+    }
+
     override fun close() {
         try {
             cuda.makeCurrent()
@@ -141,10 +152,7 @@ internal class OptixSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSes
 
     /** Uploads [s] and builds the tree over its triangles and quads. */
     private fun load(s: SceneBuffers) {
-        val kinds = (0 until s.refs.size step 2).map { s.refs[it] }.toSet()
-        if (SceneBuffers.LEAF_SPHERE in kinds || SceneBuffers.LEAF_MEDIUM in kinds) {
-            throw OptixUnsupportedScene("the OptiX engine does not trace spheres or fog yet (-Drt.backend=cuda renders this scene)")
-        }
+        unsupported(s)?.let { throw OptixUnsupportedScene(it) }
         fun keep(pointer: Long) = pointer.also { sceneMemory += it }
         // The kernel's buffers, in the order of its Params. The CUDA kernel's own tree
         // (nodes, leaves, refs) is not read here: OptiX searches its own.
@@ -187,7 +195,6 @@ internal class OptixSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSes
         }
         quadIds = keep(DeviceMemory.upload(sceneQuads))
         val sets = listOf(triangleVertices, quadVertices).filter { it.isNotEmpty() }
-        if (sets.isEmpty()) throw OptixUnsupportedScene("the scene has nothing the OptiX engine can trace")
         quadInput = if (quadVertices.isEmpty()) -1 else sets.size - 1
         tree = OptixAccel(layout, context).triangles(sets)
     }
@@ -318,20 +325,32 @@ internal class OptixSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSes
         }
     }
 
-    private companion object {
+    companion object {
+        /** Why the OptiX engine cannot trace [scene] - what it holds that is not built yet - or null when it can. */
+        fun unsupported(scene: SceneBuffers): String? {
+            val kinds = (0 until scene.refs.size step 2).map { scene.refs[it] }.toSet()
+            return when {
+                SceneBuffers.LEAF_SPHERE in kinds || SceneBuffers.LEAF_MEDIUM in kinds ->
+                    "the OptiX engine does not trace spheres or fog yet"
+                SceneBuffers.LEAF_TRIANGLE !in kinds && SceneBuffers.LEAF_QUAD !in kinds ->
+                    "the scene has nothing the OptiX engine can trace"
+                else -> null
+            }
+        }
+
         /** The kernel's Params: 24 pointers and 64-bit numbers, 9 numbers of 32 bits, padded to a multiple of 8. */
-        const val PARAMS_PADDING = 4
-        const val PARAMS_BYTES = 24 * 8 + 9 * 4 + PARAMS_PADDING
+        private const val PARAMS_PADDING = 4
+        private const val PARAMS_BYTES = 24 * 8 + 9 * 4 + PARAMS_PADDING
         /** What a hit hands back: kind, index, distance and the two surface coordinates. */
-        const val PAYLOAD_VALUES = 5
-        const val GROUPS = 3
-        const val RAYGEN = 0
-        const val MISS = 1
-        const val HIT = 2
-        val STACK_FIELDS = listOf("cssRG", "cssMS", "cssCH", "cssAH", "cssIS", "cssCC", "dssDC")
+        private const val PAYLOAD_VALUES = 5
+        private const val GROUPS = 3
+        private const val RAYGEN = 0
+        private const val MISS = 1
+        private const val HIT = 2
+        private val STACK_FIELDS = listOf("cssRG", "cssMS", "cssCH", "cssAH", "cssIS", "cssCC", "dssDC")
         /** A quad as two triangles, in units of its two edges: Q, Q+u, Q+u+v and Q, Q+u+v, Q+v. */
-        val QUAD_CORNERS = listOf(0f to 0f, 1f to 0f, 1f to 1f, 0f to 0f, 1f to 1f, 0f to 1f)
+        private val QUAD_CORNERS = listOf(0f to 0f, 1f to 0f, 1f to 1f, 0f to 0f, 1f to 1f, 0f to 1f)
         // The CUDA kernel's options, without its register cap: OptiX finishes the code itself.
-        val BUILD_OPTIONS = listOf("--use_fast_math", "--std=c++17")
+        private val BUILD_OPTIONS = listOf("--use_fast_math", "--std=c++17")
     }
 }

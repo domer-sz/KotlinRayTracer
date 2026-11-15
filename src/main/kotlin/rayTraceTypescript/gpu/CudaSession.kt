@@ -6,6 +6,7 @@ import org.lwjgl.cuda.CU.cuMemAlloc
 import org.lwjgl.cuda.CU.cuMemFree
 import org.lwjgl.cuda.CU.cuMemcpyDtoH
 import org.lwjgl.cuda.CU.cuMemcpyHtoD
+import org.lwjgl.cuda.CU.cuMemsetD32
 import org.lwjgl.cuda.CU.cuModuleUnload
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
@@ -17,9 +18,10 @@ import java.nio.FloatBuffer
  * The CUDA backend of [GpuSession]: the scene's buffers in device memory, one module per kernel
  * mode compiled by NVRTC with the scene's features switched in, and the two outputs.
  */
-internal class CudaSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSession {
+internal class CudaSession(initialScene: SceneBuffers, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
-    private val cuda = CudaContext.create()
+    private val cuda = CudaContext.create(device)
+    override val devices: List<String> = listOf(GpuPick(device, Engine.CUDA).toString())
     /** Device memory the session keeps: the camera and the outputs. */
     private val buffers = mutableListOf<Long>()
     /** The scene's device memory, freed when it is replaced. */
@@ -109,6 +111,12 @@ internal class CudaSession(initialScene: SceneBuffers, maxPixels: Int) : GpuSess
         staging.limit(into.size)
         CudaContext.check(cuMemcpyDtoH(staging, outputs[target]), "cuMemcpyDtoH")
         staging.get(into)
+    }
+
+    override fun clear(target: Int) {
+        cuda.makeCurrent()
+        // All bits zero is 0.0f.
+        CudaContext.check(cuMemsetD32(outputs[target], 0, maxPixels * 3L), "cuMemsetD32")
     }
 
     /** The compiled kernel for [mode], built on first use. */
