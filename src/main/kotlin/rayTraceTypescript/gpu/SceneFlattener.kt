@@ -1,13 +1,7 @@
 package rayTraceTypescript.gpu
 
-import rayTraceTypescript.Color
 import rayTraceTypescript.Point
-import rayTraceTypescript.materials.Dielectric
-import rayTraceTypescript.materials.Isotropic
-import rayTraceTypescript.materials.DiffuseLight
-import rayTraceTypescript.materials.Lambertian
 import rayTraceTypescript.materials.Material
-import rayTraceTypescript.materials.Metal
 import rayTraceTypescript.objects.BvhNode
 import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.objects.HittableList
@@ -17,15 +11,6 @@ import rayTraceTypescript.objects.RotateY
 import rayTraceTypescript.objects.Translate
 import rayTraceTypescript.objects.Sphere
 import rayTraceTypescript.objects.Triangle
-import rayTraceTypescript.textures.CheckerTexture
-import rayTraceTypescript.textures.ImageTexture
-import rayTraceTypescript.textures.NoiseTexture
-import rayTraceTypescript.textures.Perlin
-import rayTraceTypescript.textures.SolidColorTexture
-import rayTraceTypescript.textures.Texture
-import rayTraceTypescript.textures.UvCheckerTexture
-import java.io.ByteArrayOutputStream
-import java.util.IdentityHashMap
 
 /**
  * Walks the CPU scene graph once and lays it out as flat arrays for the GPU.
@@ -47,18 +32,7 @@ class SceneFlattener private constructor() {
     private val mediumInts = IntBuffer()
     private val mediumFloats = FloatBuffer()
     private val lights = IntBuffer()
-    private val materialInts = IntBuffer()
-    private val materialFloats = FloatBuffer()
-    private val textureInts = IntBuffer()
-    private val textureFloats = FloatBuffer()
-    private val images = ByteArrayOutputStream()
-    private val perlinVectors = FloatBuffer()
-    private val perlinPermutations = IntBuffer()
-
-    private val materialIndices = IdentityHashMap<Material, Int>()
-    private val textureIndices = IdentityHashMap<Texture, Int>()
-    private val colorTextures = IdentityHashMap<Color, Int>()
-    private val perlinBlocks = IdentityHashMap<Perlin, Int>()
+    private val materials = MaterialTable()
 
     private val bvh = BvhBuilder()
 
@@ -90,13 +64,13 @@ class SceneFlattener private constructor() {
             mediumInts = mediumInts.toArray(),
             mediumFloats = mediumFloats.toArray(),
             lights = lights.toArray(),
-            materialInts = materialInts.toArray(),
-            materialFloats = materialFloats.toArray(),
-            textureInts = textureInts.toArray(),
-            textureFloats = textureFloats.toArray(),
-            textureImages = images.toByteArray(),
-            perlinVectors = perlinVectors.toArray(),
-            perlinPermutations = perlinPermutations.toArray(),
+            materialInts = materials.materialInts.toArray(),
+            materialFloats = materials.materialFloats.toArray(),
+            textureInts = materials.textureInts.toArray(),
+            textureFloats = materials.textureFloats.toArray(),
+            textureImages = materials.images.toByteArray(),
+            perlinVectors = materials.perlinVectors.toArray(),
+            perlinPermutations = materials.perlinPermutations.toArray(),
             rootNode = root,
             maxDepth = bvh.maxDepth
         )
@@ -304,102 +278,7 @@ class SceneFlattener private constructor() {
         return Triple(sphereIndex, start, end)
     }
 
-    private fun registerMaterial(material: Material): Int = materialIndices.getOrPut(material) {
-        val index = materialInts.size / SceneBuffers.MATERIAL_INT_STRIDE
-        when (material) {
-            is Lambertian -> {
-                materialInts.add(0)
-                materialInts.add(registerTexture(material.texture))
-                materialFloats.add(0.0f)
-                materialFloats.add(0.0f)
-            }
-            is Metal -> {
-                materialInts.add(1)
-                materialInts.add(registerColor(material.albedo))
-                materialFloats.add(material.fuzz)
-                materialFloats.add(0.0f)
-            }
-            is DiffuseLight -> {
-                materialInts.add(3)
-                materialInts.add(registerTexture(material.texture))
-                materialFloats.add(0.0f)
-                materialFloats.add(0.0f)
-            }
-            is Isotropic -> {
-                materialInts.add(4)
-                materialInts.add(registerTexture(material.texture))
-                materialFloats.add(0.0f)
-                materialFloats.add(0.0f)
-            }
-            is Dielectric -> {
-                materialInts.add(2)
-                materialInts.add(0)
-                materialFloats.add(0.0f)
-                materialFloats.add(material.ri)
-            }
-            else -> throw IllegalArgumentException("Unsupported material for GPU rendering: ${material::class.java.name}")
-        }
-        index
-    }
-
-    private fun registerTexture(texture: Texture): Int = textureIndices.getOrPut(texture) {
-        when (texture) {
-            is SolidColorTexture -> solidTexture(texture.albedo)
-            is CheckerTexture -> {
-                // Children first: their indices are payload of the checker entry.
-                val even = registerTexture(texture.even)
-                val odd = registerTexture(texture.odd)
-                textureEntry(intArrayOf(1, even, odd, 0), floatArrayOf(texture.invertedScale, 0.0f, 0.0f, 0.0f))
-            }
-            is ImageTexture -> imageTexture(texture)
-            is NoiseTexture -> textureEntry(
-                intArrayOf(4, registerPerlin(texture.perlin), 0, 0),
-                floatArrayOf(texture.scale, 0.0f, 0.0f, 0.0f)
-            )
-            is UvCheckerTexture -> {
-                val even = registerTexture(texture.even)
-                val odd = registerTexture(texture.odd)
-                textureEntry(intArrayOf(5, even, odd, 0), floatArrayOf(texture.cellsU, texture.cellsV, 0.0f, 0.0f))
-            }
-            else -> throw IllegalArgumentException("Unsupported texture for GPU rendering: ${texture::class.java.name}")
-        }
-    }
-
-    /** Copies one Perlin instance's lattice into the shared buffers and returns its block. */
-    private fun registerPerlin(perlin: Perlin): Int = perlinBlocks.getOrPut(perlin) {
-        val block = perlinVectors.size / SceneBuffers.PERLIN_BLOCK
-        perlin.randomVectors.forEach { vector ->
-            perlinVectors.add(vector.x)
-            perlinVectors.add(vector.y)
-            perlinVectors.add(vector.z)
-        }
-        listOf(perlin.permX, perlin.permY, perlin.permZ).forEach { table ->
-            table.forEach { perlinPermutations.add(it) }
-        }
-        block
-    }
-
-    private fun registerColor(color: Color): Int = colorTextures.getOrPut(color) { solidTexture(color) }
-
-    private fun solidTexture(color: Color): Int =
-        textureEntry(intArrayOf(0, 0, 0, 0), floatArrayOf(color.r, color.g, color.b, 0.0f))
-
-    private fun imageTexture(texture: ImageTexture): Int {
-        val image = texture.image
-        val bytes = image.rgbBytes()
-        // Matches ImageTexture.value(): an image that failed to load renders as cyan.
-        if (bytes == null || image.height() <= 0) return textureEntry(intArrayOf(3, 0, 0, 0), FloatArray(4))
-        val offset = images.size()
-        images.write(bytes)
-        return textureEntry(intArrayOf(2, offset, image.width(), image.height()), FloatArray(4))
-    }
-
-    private fun textureEntry(ints: IntArray, floats: FloatArray): Int {
-        val index = textureInts.size / SceneBuffers.TEXTURE_INT_STRIDE
-        ints.forEach { textureInts.add(it) }
-        floats.forEach { textureFloats.add(it) }
-        return index
-    }
+    private fun registerMaterial(material: Material): Int = materials.register(material)
 }
 
 /** A growable FloatArray: the scene can run to millions of floats, too many to box one by one. */
