@@ -20,61 +20,79 @@ import rayTraceTypescript.objects.Mesh
  *
  * The copied boxes are the boxes of the turned boxes, a little looser than a tree built for the
  * turned mesh would have; every hit is still found, only traversal gets slightly slower.
+ *
+ * That tree is the CUDA kernel's, and is built the first time the kernel's layout asks for it:
+ * OptiX builds a tree of its own from the mesh's vertices, on the card, and a model that only
+ * OptiX ever traces never pays for this one - a couple of seconds for a large model.
  */
 class MeshBlock(val mesh: Mesh) {
-    /** [SceneBuffers.TRIANGLE_STRIDE] floats per triangle (v0, edge1, edge2), in leaf order. */
-    internal val triangles: FloatArray
-    internal val nodes: IntArray
-    internal val leaves: IntArray
-    /** (kind, triangle) pairs, triangles counted from 0 in [triangles]. */
-    internal val refs: IntArray
-    internal val maxDepth: Int
-    /** Each triangle's entry in the mesh's palette, in leaf order; null when the file gave none. */
-    internal val faceMaterials: IntArray?
     val triangleCount: Int = mesh.triangleCount
     val bounds: Aabb = mesh.bounds()
 
-    init {
-        val stride = SceneBuffers.TRIANGLE_STRIDE
-        val source = FloatArray(triangleCount * stride)
-        val prims = PrimitiveRefs()
-        val v = mesh.vertices
-        for (t in 0 until triangleCount) {
-            val at = t * Mesh.VERTEX_FLOATS
-            val out = t * stride
-            for (a in 0 until 3) {
-                source[out + a] = v[at + a]
-                source[out + 4 + a] = v[at + 3 + a] - v[at + a]
-                source[out + 8 + a] = v[at + 6 + a] - v[at + a]
-            }
-            // The same padded box a Triangle gives itself.
-            val box = Aabb.fromPoints(
-                Point(minOf(v[at], v[at + 3], v[at + 6]), minOf(v[at + 1], v[at + 4], v[at + 7]), minOf(v[at + 2], v[at + 5], v[at + 8])),
-                Point(maxOf(v[at], v[at + 3], v[at + 6]), maxOf(v[at + 1], v[at + 4], v[at + 7]), maxOf(v[at + 2], v[at + 5], v[at + 8]))
-            ).padded()
-            prims.add(SceneBuffers.LEAF_TRIANGLE, t, box.x.min, box.y.min, box.z.min, box.x.max, box.y.max, box.z.max)
-        }
-        val builder = BvhBuilder()
-        builder.build(prims)
+    private val tree: Tree by lazy { Tree(mesh) }
 
-        // Triangles in the order the leaves read them, as SceneFlattener lays a scene out.
-        val ordered = FloatArray(source.size)
-        val treeRefs = builder.refs.toArray()
-        val sourceMaterials = mesh.faceMaterials?.takeIf { mesh.hasColours }
-        val orderedMaterials = sourceMaterials?.let { IntArray(it.size) }
-        for (i in treeRefs.indices step 2) {
-            val old = treeRefs[i + 1]
-            val next = i / 2
-            System.arraycopy(source, old * stride, ordered, next * stride, stride)
-            if (orderedMaterials != null) orderedMaterials[next] = sourceMaterials[old]
-            treeRefs[i + 1] = next
+    /** [SceneBuffers.TRIANGLE_STRIDE] floats per triangle (v0, edge1, edge2), in leaf order. */
+    internal val triangles: FloatArray get() = tree.triangles
+    internal val nodes: IntArray get() = tree.nodes
+    internal val leaves: IntArray get() = tree.leaves
+    /** (kind, triangle) pairs, triangles counted from 0 in [triangles]. */
+    internal val refs: IntArray get() = tree.refs
+    internal val maxDepth: Int get() = tree.maxDepth
+    /** Each triangle's entry in the mesh's palette, in leaf order; null when the file gave none. */
+    internal val faceMaterials: IntArray? get() = tree.faceMaterials
+
+    /** The mesh's triangles and SAH tree as the CUDA kernel reads them. */
+    private class Tree(mesh: Mesh) {
+        val triangles: FloatArray
+        val nodes: IntArray
+        val leaves: IntArray
+        val refs: IntArray
+        val maxDepth: Int
+        val faceMaterials: IntArray?
+
+        init {
+            val triangleCount = mesh.triangleCount
+            val stride = SceneBuffers.TRIANGLE_STRIDE
+            val source = FloatArray(triangleCount * stride)
+            val prims = PrimitiveRefs()
+            val v = mesh.vertices
+            for (t in 0 until triangleCount) {
+                val at = t * Mesh.VERTEX_FLOATS
+                val out = t * stride
+                for (a in 0 until 3) {
+                    source[out + a] = v[at + a]
+                    source[out + 4 + a] = v[at + 3 + a] - v[at + a]
+                    source[out + 8 + a] = v[at + 6 + a] - v[at + a]
+                }
+                // The same padded box a Triangle gives itself.
+                val box = Aabb.fromPoints(
+                    Point(minOf(v[at], v[at + 3], v[at + 6]), minOf(v[at + 1], v[at + 4], v[at + 7]), minOf(v[at + 2], v[at + 5], v[at + 8])),
+                    Point(maxOf(v[at], v[at + 3], v[at + 6]), maxOf(v[at + 1], v[at + 4], v[at + 7]), maxOf(v[at + 2], v[at + 5], v[at + 8]))
+                ).padded()
+                prims.add(SceneBuffers.LEAF_TRIANGLE, t, box.x.min, box.y.min, box.z.min, box.x.max, box.y.max, box.z.max)
+            }
+            val builder = BvhBuilder()
+            builder.build(prims)
+
+            // Triangles in the order the leaves read them, as SceneFlattener lays a scene out.
+            val ordered = FloatArray(source.size)
+            val treeRefs = builder.refs.toArray()
+            val sourceMaterials = mesh.faceMaterials?.takeIf { mesh.hasColours }
+            val orderedMaterials = sourceMaterials?.let { IntArray(it.size) }
+            for (i in treeRefs.indices step 2) {
+                val old = treeRefs[i + 1]
+                val next = i / 2
+                System.arraycopy(source, old * stride, ordered, next * stride, stride)
+                if (orderedMaterials != null) orderedMaterials[next] = sourceMaterials[old]
+                treeRefs[i + 1] = next
+            }
+            triangles = ordered
+            faceMaterials = orderedMaterials
+            nodes = builder.nodes.toArray()
+            leaves = builder.leaves.toArray()
+            refs = treeRefs
+            maxDepth = builder.maxDepth
         }
-        triangles = ordered
-        faceMaterials = orderedMaterials
-        nodes = builder.nodes.toArray()
-        leaves = builder.leaves.toArray()
-        refs = treeRefs
-        maxDepth = builder.maxDepth
     }
 }
 
