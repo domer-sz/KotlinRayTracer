@@ -2,3 +2,7 @@ target
 # Films are large: the turntable reference keeps its frames in git, the MP4 stays local.
 reference/**/*.mp4
 renders/
+# NVIDIA's OptiX headers may not be redistributed: native/optix/fetch.ps1 fetches them.
+native/optix/*
+!native/optix/README.md
+!native/optix/fetch.ps1
