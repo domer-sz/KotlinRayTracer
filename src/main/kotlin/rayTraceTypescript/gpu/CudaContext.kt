@@ -22,6 +22,8 @@ import org.lwjgl.cuda.NVRTC.nvrtcGetCUBIN
 import org.lwjgl.cuda.NVRTC.nvrtcGetCUBINSize
 import org.lwjgl.cuda.NVRTC.nvrtcGetErrorString
 import org.lwjgl.cuda.NVRTC.nvrtcGetNumSupportedArchs
+import org.lwjgl.cuda.NVRTC.nvrtcGetOptiXIR
+import org.lwjgl.cuda.NVRTC.nvrtcGetOptiXIRSize
 import org.lwjgl.cuda.NVRTC.nvrtcGetPTX
 import org.lwjgl.cuda.NVRTC.nvrtcGetPTXSize
 import org.lwjgl.cuda.NVRTC.nvrtcGetProgramLog
@@ -31,6 +33,7 @@ import org.lwjgl.system.Configuration
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
 import java.io.File
+import java.nio.ByteBuffer
 
 /**
  * A CUDA device and its primary context, plus the kernel compiler.
@@ -53,33 +56,18 @@ class CudaContext private constructor(
     fun makeCurrent() = check(cuCtxSetCurrent(context), "cuCtxSetCurrent")
 
     /**
-     * Compiles [source] with [options] and loads it, returning the module and its `render`
+     * Compiles [source] with [options] and loads it, returning the module and its [entry]
      * function. Code for the card itself (a cubin) when NVRTC knows the card; otherwise PTX for
      * the newest architecture it knows, which the driver finishes compiling.
      */
-    fun buildKernel(source: String, options: List<String>): Pair<Long, Long> {
-        makeCurrent()
-        MemoryStack.stackPush().use { stack ->
-            val programOut = stack.mallocPointer(1)
-            checkNvrtc(nvrtcCreateProgram(programOut, source, "raytracer.cu", null, null), "nvrtcCreateProgram")
-            val program = programOut.get(0)
-            try {
-                val supported = supportedArchitectures()
-                // -Drt.cuda.ptx hands the driver PTX to finish instead of a ready cubin.
-                val native = computeCapability in supported && System.getProperty("rt.cuda.ptx") == null
-                val arch = if (native) "--gpu-architecture=sm_$computeCapability"
-                else "--gpu-architecture=compute_${supported.filter { it <= computeCapability }.maxOrNull() ?: supported.min()}"
-                val all = listOf(arch) + options
-                val pointers = stack.mallocPointer(all.size)
-                all.forEachIndexed { i, option -> pointers.put(i, stack.UTF8(option)) }
-                val status = nvrtcCompileProgram(program, pointers)
-                val log = programLog(program)
-                if (status != NVRTC_SUCCESS) {
-                    throw CudaException("Kernel build failed (${nvrtcGetErrorString(status)}):\n$log")
-                }
-                // -Drt.cuda.log shows what the compiler said even on success.
-                if (System.getProperty("rt.cuda.log") != null && log.isNotBlank()) System.err.println("[gpu] build log:\n$log")
-
+    fun buildKernel(source: String, options: List<String>, entry: String = "render"): Pair<Long, Long> {
+        val supported = supportedArchitectures()
+        // -Drt.cuda.ptx hands the driver PTX to finish instead of a ready cubin.
+        val native = computeCapability in supported && System.getProperty("rt.cuda.ptx") == null
+        val arch = if (native) "--gpu-architecture=sm_$computeCapability"
+        else "--gpu-architecture=compute_${supported.filter { it <= computeCapability }.maxOrNull() ?: supported.min()}"
+        return compile(source, listOf(arch) + options) { program ->
+            MemoryStack.stackPush().use { stack ->
                 val image = if (native) {
                     val size = stack.mallocPointer(1)
                     checkNvrtc(nvrtcGetCUBINSize(program, size), "nvrtcGetCUBINSize")
@@ -106,15 +94,64 @@ class CudaContext private constructor(
                         check(cuModuleLoadData(module, image), "cuModuleLoadData")
                     }
                     val function = stack.mallocPointer(1)
-                    check(cuModuleGetFunction(function, module.get(0), "render"), "cuModuleGetFunction")
-                    return module.get(0) to function.get(0)
+                    check(cuModuleGetFunction(function, module.get(0), entry), "cuModuleGetFunction")
+                    module.get(0) to function.get(0)
                 } finally {
                     MemoryUtil.memFree(image)
                 }
+            }
+        }
+    }
+
+    /**
+     * Compiles [source] with [options] into OptiX IR, the form OptiX takes its programs in; the
+     * driver finishes it for the card. With [ptx] it is PTX instead, the older form OptiX also
+     * reads. The caller frees the buffer.
+     */
+    fun buildOptixProgram(source: String, options: List<String>, ptx: Boolean = false): ByteBuffer =
+        compile(source, if (ptx) options else options + "--optix-ir") { program ->
+            MemoryStack.stackPush().use { stack ->
+                val size = stack.mallocPointer(1)
+                if (ptx) {
+                    checkNvrtc(nvrtcGetPTXSize(program, size), "nvrtcGetPTXSize")
+                    MemoryUtil.memAlloc(size.get(0).toInt()).also { checkNvrtc(nvrtcGetPTX(program, it), "nvrtcGetPTX") }
+                } else {
+                    checkNvrtc(nvrtcGetOptiXIRSize(program, size), "nvrtcGetOptiXIRSize")
+                    if (size.get(0) == 0L) throw CudaException("NVRTC produced no OptiX IR for these options")
+                    MemoryUtil.memAlloc(size.get(0).toInt()).also { checkNvrtc(nvrtcGetOptiXIR(program, it), "nvrtcGetOptiXIR") }
+                }
+            }
+        }
+
+    /** Runs NVRTC over [source] with [options] and hands the compiled program to [read]. */
+    private fun <T> compile(source: String, options: List<String>, read: (program: Long) -> T): T {
+        makeCurrent()
+        val programOut = MemoryUtil.memAllocPointer(1)
+        // The options can run long - include paths, a define per scene feature - so off the stack.
+        val texts = options.map { MemoryUtil.memUTF8(it) }
+        val pointers = MemoryUtil.memAllocPointer(maxOf(options.size, 1))
+        try {
+            checkNvrtc(nvrtcCreateProgram(programOut, source, "raytracer.cu", null, null), "nvrtcCreateProgram")
+            val program = programOut.get(0)
+            try {
+                texts.forEachIndexed { i, text -> pointers.put(i, text) }
+                pointers.limit(options.size)
+                val status = nvrtcCompileProgram(program, pointers)
+                val log = programLog(program)
+                if (status != NVRTC_SUCCESS) {
+                    throw CudaException("Kernel build failed (${nvrtcGetErrorString(status)}):\n$log")
+                }
+                // -Drt.cuda.log shows what the compiler said even on success.
+                if (System.getProperty("rt.cuda.log") != null && log.isNotBlank()) System.err.println("[gpu] build log:\n$log")
+                return read(program)
             } finally {
                 programOut.put(0, program)
                 nvrtcDestroyProgram(programOut)
             }
+        } finally {
+            texts.forEach { MemoryUtil.memFree(it) }
+            MemoryUtil.memFree(pointers)
+            MemoryUtil.memFree(programOut)
         }
     }
 
@@ -144,13 +181,13 @@ class CudaContext private constructor(
 
         @Volatile private var initialised = false
 
-        fun create(): CudaContext {
+        /** A context on the first device whose name holds [filter]; on the first device without one. */
+        fun create(filter: String? = System.getenv(DEVICE_FILTER_ENV) ?: System.getenv("RT_OPENCL_DEVICE")): CudaContext {
             initialise()
             MemoryStack.stackPush().use { stack ->
                 val count = stack.mallocInt(1)
                 check(cuDeviceGetCount(count), "cuDeviceGetCount")
                 if (count.get(0) == 0) throw CudaException("no CUDA device found")
-                val filter = System.getenv(DEVICE_FILTER_ENV) ?: System.getenv("RT_OPENCL_DEVICE")
                 val handle = stack.mallocInt(1)
                 val devices = (0 until count.get(0)).map { ordinal ->
                     check(cuDeviceGet(handle, ordinal), "cuDeviceGet")
