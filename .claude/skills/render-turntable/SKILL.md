@@ -97,6 +97,8 @@ monitor has happened before.
 | `-Drt.samples` | scene's (64 in studio-model) | samples per pixel per frame; time scales with it |
 | `-Drt.width` / `-Drt.aspect` | scene's (1080, 9:16) | frame size; must come out even |
 | `-Drt.denoise=off` | on | raw frames |
+| `-Drt.smooth=off` | on | flat facets instead of smooth shading (films before 2026-11-15 were flat) |
+| `-Drt.firefly` | 16 (studio-model: 16 x its exposure) | the brightest a sample may be; `off` lets every sample through |
 | `-Drt.studio.turn` | 0 | studio-model: the figure's starting angle (degrees) |
 
 studio-model is StlViewer's gold-reel scene at angle 0 with its own dumped numbers (gold metal
@@ -130,8 +132,11 @@ folder is outside this one; reading it needs the user's permission). Not against
 `003-yennefer-gold-v4-max-frame.png`: StlViewer confirmed that one is another angle, not frame 0.
 Expect a systematic gap, not noise: frame 0 came out at 25.8 dB / SSIM 0.887 and frame 225 at
 24.5 / 0.879, against ~32.7 / 0.90 for StlViewer's film vs its own 2048-spp reference.
-StlViewer smooths vertex normals and clamps fireflies at 16; this renderer uses flat facet
-normals and no clamp.
+Those numbers are from before 2026-11-15, when this renderer still shaded flat facets with no
+firefly cap. StlViewer's v4 film (64 spp, OIDN, depth 8, its "KoltinRayTracer" tone curve,
+exposure -0.4 EV) differed from it only in smooth normals and the cap at 16; both came over
+that day, and a denoised still at angle 0 now sits 31.8 dB / SSIM 0.914 from v4's frame 0
+(25.3 / 0.884 flat).
 
 ## Measured (RTX 2060 + GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
 
@@ -141,7 +146,13 @@ normals and no clamp.
     **0.52 s a frame** (scene 10 ms, tracing 386 ms, guides 108 ms, no waiting; denoising 323 ms
     beside it). Full film, same day, the command above: 450 frames at 0.46 s = **3.5 min**
     (renders/003-yennefer-gold-koltin-max-rtx.mp4, 17.1 MB, 9.13 Mbit/s) - 7.6 times as fast as
-    the OpenCL film on the GTX 1070 (26 min), 3.9 times as fast as StlViewer's (13.6 min);
+    the OpenCL film on the GTX 1070 (26 min), 3.9 times as fast as StlViewer's (13.6 min).
+    The same with smooth shading and the firefly cap, the defaults since:
+    450 frames at 0.48 s = 3.6 min (tracing 391 ms a frame against 371 flat;
+    renders/003-yennefer-gold-koltin-max-smooth.mp4, 17.0 MB). Its frame 0 sits 32.95 dB /
+    SSIM 0.910 from StlViewer v4's frame 0; frame 225 only 25.5 dB / 0.891, because v4's figure
+    stands 8-11 px off in that frame - StlViewer reframes during the turn (SAFE=1), this
+    renderer does not; at 180 degrees the shading itself matches;
   - `-Drt.denoiser=oidn` (as all films before this day): 1.51 s a frame, of it 893 ms waiting for
     OIDN on the CPU (1447 ms a frame);
   - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.
