@@ -66,11 +66,30 @@ internal class GpuKeepAwake private constructor() : AutoCloseable {
     companion object {
         private const val TICK_MS = 16L
 
-        /** Starts the keep-alive where it helps and is allowed; null otherwise. */
-        fun startIfUseful(): GpuKeepAwake? {
+        /** The one window of the process, and how many sessions want it kept. */
+        private var shared: GpuKeepAwake? = null
+        private var users = 0
+
+        /**
+         * Starts the keep-alive where it helps and is allowed; null otherwise. Sessions share one
+         * window - two cards rendering together are two sessions - which goes when the last of
+         * them closes what this returned.
+         */
+        @Synchronized
+        fun startIfUseful(): AutoCloseable? {
             if (System.getProperty("rt.keepawake") == "off") return null
             if (!System.getProperty("os.name", "").lowercase().contains("windows")) return null
-            return GpuKeepAwake().also { it.thread.start() }
+            if (users++ == 0) shared = GpuKeepAwake().also { it.thread.start() }
+            val released = java.util.concurrent.atomic.AtomicBoolean(false)
+            return AutoCloseable { if (released.compareAndSet(false, true)) release() }
+        }
+
+        @Synchronized
+        private fun release() {
+            if (--users == 0) {
+                shared?.close()
+                shared = null
+            }
         }
     }
 }
