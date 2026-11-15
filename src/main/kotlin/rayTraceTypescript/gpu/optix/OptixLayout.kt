@@ -67,8 +67,17 @@ internal class OptixLayout private constructor(private val values: Map<String, L
                 "hitgroupRecordBase", "hitgroupRecordStrideInBytes", "hitgroupRecordCount"
             ),
             "OptixStackSizes" to listOf("cssRG", "cssMS", "cssCH", "cssAH", "cssIS", "cssCC", "dssDC"),
-            "OptixFunctionTable" to emptyList()
+            "OptixFunctionTable" to emptyList(),
+            "OptixDenoiserOptions" to listOf("guideAlbedo", "guideNormal", "denoiseAlpha"),
+            "OptixDenoiserSizes" to listOf("stateSizeInBytes", "withoutOverlapScratchSizeInBytes"),
+            "OptixDenoiserParams" to listOf("hdrIntensity", "blendFactor", "hdrAverageColor", "temporalModeUsePreviousLayers"),
+            "OptixDenoiserGuideLayer" to listOf("albedo", "normal").flatMap { image -> IMAGE_FIELDS.map { "$image.$it" } },
+            "OptixDenoiserLayer" to listOf("input", "output").flatMap { image -> IMAGE_FIELDS.map { "$image.$it" } } + "type"
         )
+
+        /** The fields of an OptixImage2D, which the denoiser's structures hold several of. */
+        private val IMAGE_FIELDS: List<String>
+            get() = listOf("data", "width", "height", "rowStrideInBytes", "pixelStrideInBytes", "format")
 
         private val CONSTANTS = listOf(
             "OPTIX_VERSION", "OPTIX_ABI_VERSION",
@@ -83,7 +92,9 @@ internal class OptixLayout private constructor(private val values: Map<String, L
             "OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE", "OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM",
             "OPTIX_PROGRAM_GROUP_KIND_RAYGEN", "OPTIX_PROGRAM_GROUP_KIND_MISS", "OPTIX_PROGRAM_GROUP_KIND_HITGROUP",
             "OPTIX_INSTANCE_FLAG_NONE",
-            "OPTIX_DEVICE_PROPERTY_RTCORE_VERSION"
+            "OPTIX_DEVICE_PROPERTY_RTCORE_VERSION",
+            "OPTIX_DENOISER_MODEL_KIND_AOV", "OPTIX_PIXEL_FORMAT_FLOAT3",
+            "OPTIX_DENOISER_ALPHA_MODE_COPY", "OPTIX_DENOISER_AOV_TYPE_BEAUTY"
         )
 
         private val EXPRESSIONS: List<String> =

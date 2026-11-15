@@ -19,7 +19,8 @@ import java.io.File
  * fresh clone denoises as is; -Drt.oidn=<dir> or OIDN_DIR point elsewhere. Only the CPU device
  * is used, as OIDN's GPU devices need a newer card than a GTX 1070.
  */
-class Denoiser private constructor(private val library: SharedLibrary) : AutoCloseable {
+class Denoiser private constructor(private val library: SharedLibrary) : ImageDenoiser {
+    override val name: String = "OIDN (CPU)"
 
     private val newDevice = Fn("oidnNewDevice", LibFFI.ffi_type_pointer, LibFFI.ffi_type_sint32)
     private val commitDevice = Fn("oidnCommitDevice", LibFFI.ffi_type_void, LibFFI.ffi_type_pointer)
@@ -51,7 +52,7 @@ class Denoiser private constructor(private val library: SharedLibrary) : AutoClo
      * One call at a time: the filter and its buffers are shared between calls.
      */
     @Synchronized
-    fun denoise(width: Int, height: Int, color: FloatArray, albedo: FloatArray, normal: FloatArray): FloatArray {
+    override fun denoise(width: Int, height: Int, color: FloatArray, albedo: FloatArray, normal: FloatArray): FloatArray {
         prepare(width, height)
         try {
             listOf(color, albedo, normal).forEachIndexed { i, data ->

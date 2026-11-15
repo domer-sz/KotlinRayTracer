@@ -72,7 +72,12 @@ internal object OptixApi {
         "optixAccelBuild" to "ippppullllppu",
         "optixAccelCompact" to "ipplllp",
         "optixSbtRecordPackHeader" to "ipp",
-        "optixLaunch" to "ippllpuuu"
+        "optixLaunch" to "ippllpuuu",
+        "optixDenoiserCreate" to "ipipp",
+        "optixDenoiserDestroy" to "ip",
+        "optixDenoiserComputeMemoryResources" to "ipuup",
+        "optixDenoiserSetup" to "ippuullll",
+        "optixDenoiserInvoke" to "ipppllppuuull"
     )
 
     private val table: Long by lazy { load() }
