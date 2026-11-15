@@ -150,9 +150,11 @@ that day, and a denoised still at angle 0 now sits 31.8 dB / SSIM 0.914 from v4'
     The same with smooth shading and the firefly cap, the defaults since:
     450 frames at 0.48 s = 3.6 min (tracing 391 ms a frame against 371 flat;
     renders/003-yennefer-gold-koltin-max-smooth.mp4, 17.0 MB). Its frame 0 sits 32.95 dB /
-    SSIM 0.910 from StlViewer v4's frame 0; frame 225 only 25.5 dB / 0.891, because v4's figure
-    stands 8-11 px off in that frame - StlViewer reframes during the turn (SAFE=1), this
-    renderer does not; at 180 degrees the shading itself matches;
+    SSIM 0.910 from StlViewer v4's frame 0; frame 225 only 25.5 dB / 0.891 - one pixel off,
+    because that film still turned the figure about the middle of its box, StlViewer about its
+    foot (1.1 mm apart for Yennefer; gold's sharp highlights show even that). Turned about its
+    foot, as films are since (gpu/Footprint), 180 degrees sits 33.9 dB / SSIM 0.915 from v4's
+    frame 225;
   - `-Drt.denoiser=oidn` (as all films before this day): 1.51 s a frame, of it 893 ms waiting for
     OIDN on the CPU (1447 ms a frame);
   - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.
