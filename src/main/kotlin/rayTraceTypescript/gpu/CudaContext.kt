@@ -131,8 +131,11 @@ class CudaContext private constructor(
         // The options can run long - include paths, a define per scene feature - so off the stack.
         val texts = options.map { MemoryUtil.memUTF8(it) }
         val pointers = MemoryUtil.memAllocPointer(maxOf(options.size, 1))
+        // The source too: LWJGL would copy it onto its 64 KB stack, which the kernel outgrew.
+        val sourceText = MemoryUtil.memUTF8(source)
+        val nameText = MemoryUtil.memUTF8("raytracer.cu")
         try {
-            checkNvrtc(nvrtcCreateProgram(programOut, source, "raytracer.cu", null, null), "nvrtcCreateProgram")
+            checkNvrtc(nvrtcCreateProgram(programOut, sourceText, nameText, null, null), "nvrtcCreateProgram")
             val program = programOut.get(0)
             try {
                 texts.forEachIndexed { i, text -> pointers.put(i, text) }
@@ -152,6 +155,8 @@ class CudaContext private constructor(
         } finally {
             texts.forEach { MemoryUtil.memFree(it) }
             MemoryUtil.memFree(pointers)
+            MemoryUtil.memFree(sourceText)
+            MemoryUtil.memFree(nameText)
             MemoryUtil.memFree(programOut)
         }
     }
