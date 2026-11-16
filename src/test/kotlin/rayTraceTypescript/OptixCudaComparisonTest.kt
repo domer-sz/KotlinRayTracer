@@ -7,14 +7,17 @@ import rayTraceTypescript.gpu.GpuRenderer
 import rayTraceTypescript.gpu.MeshBlock
 import rayTraceTypescript.gpu.PlacedMesh
 import rayTraceTypescript.gpu.optix.OptixApi
+import rayTraceTypescript.materials.Dielectric
 import rayTraceTypescript.materials.DiffuseLight
 import rayTraceTypescript.materials.Lambertian
 import rayTraceTypescript.materials.Metal
+import rayTraceTypescript.objects.ConstantMedium
 import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.objects.HittableList
 import rayTraceTypescript.objects.Mesh
 import rayTraceTypescript.objects.MeshMaterial
 import rayTraceTypescript.objects.Quad
+import rayTraceTypescript.objects.Sphere
 import rayTraceTypescript.render.PpmWriter
 import rayTraceTypescript.utils.RandomSource
 import java.nio.file.Files
@@ -104,6 +107,80 @@ class OptixCudaComparisonTest {
         assumeOptix()
         val facets = octahedron().smoothed().rotatedY(20.0f).toHittables(Metal(Color(0.8f, 0.8f, 0.85f), 0.02f))
         val world = HittableList((listOf(floor()) + facets).toMutableList())
+        assertLooksTheSame(world)
+    }
+
+    @Test
+    fun `optix places a model on a sphere floor as the kernel does`() {
+        // The model scene's layout: a mesh standing on the top of a huge sphere.
+        assumeOptix()
+        val world = HittableList(
+            mutableListOf(
+                Sphere(Point(0.0f, -1000.0f, 0.0f), 1000.0f, Lambertian(Color(0.5f, 0.5f, 0.5f))),
+                PlacedMesh(MeshBlock(octahedron().smoothed()), 1.2f, 25.0f, Vector(0.0f, 0.0f, 0.0f), Metal(Color(0.9f, 0.7f, 0.3f), 0.05f))
+            )
+        )
+        assertLooksTheSame(world)
+    }
+
+    @Test
+    fun `optix moves a moving sphere as the kernel does`() {
+        // A sphere that travels during the shutter: its box must cover the whole path, and the
+        // intersection program must be handed each ray's time.
+        assumeOptix()
+        val world = HittableList(
+            mutableListOf(
+                floor(),
+                Sphere(Point(-1.2f, 0.6f, 0.0f), Point(0.4f, 0.9f, 0.3f), 0.6f, Lambertian(Color(0.7f, 0.3f, 0.1f))),
+                Sphere(Point(1.2f, 0.5f, -0.6f), 0.5f, Metal(Color(0.8f, 0.8f, 0.85f), 0.1f))
+            )
+        )
+        assertLooksTheSame(world)
+    }
+
+    @Test
+    fun `optix sees through a glass sphere as the kernel does`() {
+        // A refracted ray starts inside the sphere and must find its far side: the second root.
+        assumeOptix()
+        val world = HittableList(
+            mutableListOf(
+                floor(),
+                Sphere(Point(0.0f, 0.8f, 0.0f), 0.8f, Dielectric(1.5f)),
+                Sphere(Point(0.0f, 0.8f, 0.0f), -0.7f, Dielectric(1.5f)),
+                PlacedMesh(MeshBlock(octahedron()), 0.8f, 10.0f, Vector(-1.6f, 0.0f, -1.0f), Lambertian(Color(0.2f, 0.4f, 0.7f)))
+            )
+        )
+        assertLooksTheSame(world)
+    }
+
+    @Test
+    fun `optix aims at a sphere light as the kernel does`() {
+        assumeOptix()
+        val light = Sphere(Point(0.0f, 3.0f, 0.0f), 0.7f, DiffuseLight(Color(8.0f, 8.0f, 8.0f)))
+        val world = HittableList(
+            mutableListOf(
+                floor(),
+                Sphere(Point(-0.9f, 0.6f, 0.2f), 0.6f, Lambertian(Color(0.72f, 0.38f, 0.22f))),
+                PlacedMesh(MeshBlock(octahedron()), 0.9f, 45.0f, Vector(0.9f, 0.0f, -0.3f), Lambertian(Color(0.2f, 0.4f, 0.7f))),
+                light
+            )
+        )
+        assertLooksTheSame(world, lights = light)
+    }
+
+    @Test
+    fun `optix traces fog around the camera and in a box as the kernel does`() {
+        // A thin haze the camera stands in, as in the final scene of the second book, and a dense
+        // ball of fog: every ray starts inside the first, and many pass through the second.
+        assumeOptix()
+        val world = HittableList(
+            mutableListOf(
+                floor(),
+                Sphere(Point(1.0f, 0.6f, -0.4f), 0.6f, Metal(Color(0.8f, 0.8f, 0.85f), 0.05f)),
+                ConstantMedium(Sphere(Point(-0.8f, 0.7f, 0.3f), 0.7f, Dielectric(1.5f)), 1.5f, Color(0.2f, 0.4f, 0.9f)),
+                ConstantMedium(Sphere(Point(0.0f, 0.0f, 0.0f), 50.0f, Dielectric(1.5f)), 0.02f, Color(1.0f, 1.0f, 1.0f))
+            )
+        )
         assertLooksTheSame(world)
     }
 

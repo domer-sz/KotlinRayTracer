@@ -245,7 +245,9 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         val boxes = FloatArray(s.sceneSpheres.size * 6)
         s.sceneSpheres.forEachIndexed { k, sphere ->
             val at = sphere * SceneBuffers.SPHERE_STRIDE
-            val r = s.spheres[at + 6]
+            // A negative radius turns a sphere inside out (the inner wall of a hollow glass ball);
+            // its box is as big as for a positive one.
+            val r = kotlin.math.abs(s.spheres[at + 6])
             for (axis in 0 until 3) {
                 val start = s.spheres[at + axis]
                 val end = start + s.spheres[at + 3 + axis]
