@@ -377,7 +377,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         val moduleOptions = layout.struct("OptixModuleCompileOptions")
         val pipelineOptions = layout.struct("OptixPipelineCompileOptions")
             .int("traversableGraphFlags", layout.constant("OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING").toInt())
-            .int("numPayloadValues", PAYLOAD_VALUES)
+            .int("numPayloadValues", if (defines.contains(RAY_TIME_DEFINE)) PAYLOAD_VALUES + 1 else PAYLOAD_VALUES)
             .int("numAttributeValues", 2)
             .long("pipelineLaunchParamsVariableName", name("params"))
             .int("usesPrimitiveTypeFlags", primitiveTypes.toInt())
@@ -497,7 +497,14 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         /** Why the OptiX engine cannot trace [scene] - what it holds that is not built yet - or null when it can. */
         /** The scene's feature switches, and whether OptiX meets spheres in it: that changes the pipeline. */
         private fun definesFor(scene: InstancedScene): String =
-            scene.kernelDefines() + if (scene.sceneSpheres.isNotEmpty()) " $SPHERES_DEFINE" else ""
+            scene.kernelDefines().let { features ->
+                features + when {
+                    scene.sceneSpheres.isEmpty() -> ""
+                    // Moving spheres need each ray's time in their intersection program.
+                    features.contains("-DHAS_MOTION=1") -> " $SPHERES_DEFINE $RAY_TIME_DEFINE"
+                    else -> " $SPHERES_DEFINE"
+                }
+            }
 
         fun unsupported(scene: InstancedScene): String? = when {
             scene.sceneTriangles == 0 && scene.sceneQuads.isEmpty() && scene.sceneSpheres.isEmpty() && scene.instances.isEmpty() ->
@@ -511,8 +518,8 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         private const val PARAMS_BYTES = 29 * 8 + 11 * 4 + PARAMS_PADDING
         /** The kernel's Instance: three pointers, then six numbers of 32 bits. */
         private const val INSTANCE_BYTES = 3 * 8 + 6 * 4
-        /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance; and the ray's time, which it is handed. */
-        private const val PAYLOAD_VALUES = 7
+        /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance (and with moving spheres, the ray's time, which it is handed). */
+        private const val PAYLOAD_VALUES = 6
         private const val GROUPS = 4
         private const val GROUPS_WITH_SPHERES = 5
         private const val RAYGEN = 0
@@ -524,6 +531,8 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         private const val HIT_SPHERE_RECORD = 3
         /** Added to the scene's feature switches when it has spheres to hit, so their pipeline is built anew. */
         private const val SPHERES_DEFINE = "-DOPTIX_SPHERES=1"
+        /** Added when those spheres move: the ray carries its time to their intersection program. */
+        private const val RAY_TIME_DEFINE = "-DOPTIX_RAY_TIME=1"
         private val STACK_FIELDS = listOf("cssRG", "cssMS", "cssCH", "cssAH", "cssIS", "cssCC", "dssDC")
         /** A quad as two triangles, in units of its two edges: Q, Q+u, Q+u+v and Q, Q+u+v, Q+v. */
         private val QUAD_CORNERS = listOf(0f to 0f, 1f to 0f, 1f to 1f, 0f to 0f, 1f to 1f, 0f to 1f)

@@ -637,6 +637,12 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
 #if RT_OPTIX
 
 #define OPTIX_RAY_END 1e16f
+// Whether the ray's time rides along in a seventh payload value, for the spheres' intersection
+// program to move moving spheres by. Only a scene with moving spheres pays for the extra value:
+// declared in every scene, it slowed Yennefer by 4%.
+#ifndef OPTIX_RAY_TIME
+#define OPTIX_RAY_TIME 0
+#endif
 
 // The closest hit, asked of OptiX. It comes back in the ray's payload as the closest-hit
 // programs at the end of this file fill it: what was hit, where along the ray, a triangle's
@@ -644,12 +650,17 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
 // which one.
 __device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float3 direction, float time,
                       float tMin, float tMax, Rng* rng, HitRecord* rec) {
-    // The ray's time rides along in the last value, for the spheres' intersection program to move them by.
-    unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u, instance = 0u, rayTime = __float_as_uint(time);
+    unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u, instance = 0u;
     // OptiX takes a ray reaching to infinity as invalid (its validation mode stops on it), so the
     // search ends at a distance no scene comes near.
+#if OPTIX_RAY_TIME
+    unsigned int rayTime = __float_as_uint(time);
     optixTrace(params.handle, origin, direction, tMin, fminf(tMax, OPTIX_RAY_END), 0.0f, OptixVisibilityMask(255),
                OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v, instance, rayTime);
+#else
+    optixTrace(params.handle, origin, direction, tMin, fminf(tMax, OPTIX_RAY_END), 0.0f, OptixVisibilityMask(255),
+               OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v, instance);
+#endif
     // Fog: OptiX found the nearest surface, and a volume may stop the ray before it. Its
     // boundary is a small tree medium_t searches itself, and a scene has a volume or two.
     if (HAS_MEDIA) {
@@ -1090,7 +1101,11 @@ extern "C" __global__ void __closesthit__surface() {
 extern "C" __global__ void __intersection__sphere() {
     Scene sc;
     sc.spheres = params.spheres;
-    float time = HAS_MOTION ? __uint_as_float(optixGetPayload_6()) : 0.0f;
+#if OPTIX_RAY_TIME
+    float time = __uint_as_float(optixGetPayload_6());
+#else
+    float time = 0.0f;
+#endif
     float t;
     if (sphere_t(&sc, params.sphereIds[optixGetPrimitiveIndex()], optixGetWorldRayOrigin(), optixGetWorldRayDirection(),
                  time, optixGetRayTmin(), optixGetRayTmax(), &t)) {
