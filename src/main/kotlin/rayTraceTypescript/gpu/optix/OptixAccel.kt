@@ -60,6 +60,36 @@ internal class OptixAccel(private val layout: OptixLayout, private val context: 
     }
 
     /**
+     * A tree over primitives OptiX knows only by their boxes - 6 floats each, the low corner then
+     * the high one (OptixAabb) - whose intersection program decides whether a ray meets them. A
+     * hit reports the primitive's number among them.
+     */
+    fun customPrimitives(boxes: FloatArray): Tree {
+        require(boxes.isNotEmpty() && boxes.size % 6 == 0) { "Boxes of 6 floats" }
+        val device = DeviceMemory.upload(boxes)
+        // OptiX takes the address of an array of box buffers (one per motion key).
+        val boxBuffers = MemoryUtil.memAllocLong(1).put(0, device)
+        val geometryFlags = MemoryUtil.memAllocInt(1).put(0, layout.constant("OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT").toInt())
+        val inputs = layout.struct("OptixBuildInput")
+            .int("type", layout.constant("OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES").toInt())
+            .long("customPrimitiveArray.aabbBuffers", MemoryUtil.memAddress(boxBuffers))
+            .int("customPrimitiveArray.numPrimitives", boxes.size / 6)
+            .int("customPrimitiveArray.strideInBytes", 24)
+            .long("customPrimitiveArray.flags", MemoryUtil.memAddress(geometryFlags))
+            .int("customPrimitiveArray.numSbtRecords", 1)
+        try {
+            val flags = layout.constant("OPTIX_BUILD_FLAG_ALLOW_COMPACTION") or layout.constant("OPTIX_BUILD_FLAG_PREFER_FAST_TRACE")
+            return build(inputs, 1, flags.toInt(), compact = true)
+        } finally {
+            inputs.close()
+            MemoryUtil.memFree(boxBuffers)
+            MemoryUtil.memFree(geometryFlags)
+            // The tree keeps what it needs of the boxes.
+            DeviceMemory.free(device)
+        }
+    }
+
+    /**
      * A tree over [count] instances: OptixInstance records on the card at [records], each a tree
      * of its own and where it stands. Built for speed of building - there are few of them, and
      * the tree is built again whenever anything moves.

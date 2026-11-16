@@ -310,6 +310,7 @@ struct Params {
     float* out;
     float* guideNormal;                  // with GUIDES, the normal guide the albedo guide's rays find
     const int* quadIds;                  // the quad each pair of triangles in the tree stands for
+    const int* sphereIds;                // the sphere each primitive of the spheres' tree stands for
     const Instance* instances;
     const int* palette;
     OptixTraversableHandle handle;
@@ -640,9 +641,10 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
 // which one.
 __device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float3 direction, float time,
                       float tMin, float tMax, Rng* rng, HitRecord* rec) {
-    unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u, instance = 0u;
+    // The ray's time rides along in the last value, for the spheres' intersection program to move them by.
+    unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u, instance = 0u, rayTime = __float_as_uint(time);
     optixTrace(params.handle, origin, direction, tMin, tMax, 0.0f, OptixVisibilityMask(255),
-               OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v, instance);
+               OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v, instance, rayTime);
     if (kind == 0u) return false;
 
     Closest found;
@@ -1061,6 +1063,28 @@ extern "C" __global__ void __closesthit__surface() {
     optixSetPayload_2(__float_as_uint(optixGetRayTmax()));
     optixSetPayload_3(__float_as_uint(barycentrics.x));
     optixSetPayload_4(__float_as_uint(barycentrics.y));
+}
+
+// ...or a sphere, which OptiX knows only by its box: whether and where the ray meets it is
+// sphere_t's to say, the same test the CUDA kernel makes. Its tree is not an instance's, so the
+// ray is already in the scene's space; the ray's time moves a moving sphere.
+extern "C" __global__ void __intersection__sphere() {
+    Scene sc;
+    sc.spheres = params.spheres;
+    float time = HAS_MOTION ? __uint_as_float(optixGetPayload_6()) : 0.0f;
+    float t;
+    if (sphere_t(&sc, params.sphereIds[optixGetPrimitiveIndex()], optixGetWorldRayOrigin(), optixGetWorldRayDirection(),
+                 time, optixGetRayTmin(), optixGetRayTmax(), &t)) {
+        optixReportIntersection(t, 0u);
+    }
+}
+
+extern "C" __global__ void __closesthit__sphere() {
+    optixSetPayload_0((unsigned int)LEAF_SPHERE);
+    optixSetPayload_1((unsigned int)params.sphereIds[optixGetPrimitiveIndex()]);
+    optixSetPayload_2(__float_as_uint(optixGetRayTmax()));
+    optixSetPayload_3(0u);
+    optixSetPayload_4(0u);
 }
 
 extern "C" __global__ void __miss__nothing() {

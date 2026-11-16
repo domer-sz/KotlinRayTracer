@@ -67,10 +67,13 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
 
     private var scene: InstancedScene = initial.instanced
     /** The feature switches the pipelines were built with. */
-    private var defines = scene.kernelDefines()
+    private var defines = definesFor(scene)
     private var sceneArguments: List<Long> = emptyList()
     private var loose: OptixAccel.Tree? = null
     private var top: OptixAccel.Tree? = null
+    /** The tree over the scene's spheres, by their boxes, and the sphere each of its primitives stands for. */
+    private var spheres: OptixAccel.Tree? = null
+    private var sphereIds = 0L
     private var quadIds = 0L
     private var instanceTable = 0L
     private var palette = 0L
@@ -102,7 +105,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         releaseScene()
         scene = next.instanced
         load(scene)
-        val nextDefines = scene.kernelDefines()
+        val nextDefines = definesFor(scene)
         if (nextDefines != defines) {
             releasePipelines()
             defines = nextDefines
@@ -122,7 +125,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // The kernel's Params: pointers and 64-bit numbers first, then the 32-bit ones.
         paramsHost.clear()
         sceneArguments.forEach { paramsHost.putLong(it) }
-        paramsHost.putLong(outputs[target]).putLong(outputs[GpuSession.NORMAL]).putLong(quadIds).putLong(instanceTable).putLong(palette)
+        paramsHost.putLong(outputs[target]).putLong(outputs[GpuSession.NORMAL]).putLong(quadIds).putLong(sphereIds).putLong(instanceTable).putLong(palette)
             .putLong(top!!.handle).putLong(seed)
         // The root node is the CUDA kernel's: OptiX searches its own trees.
         paramsHost.putInt(setup.imageWidth).putInt(setup.imageHeight).putInt(sampleStart).putInt(count)
@@ -237,6 +240,22 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         quadInput = if (quadVertices.isEmpty()) -1 else sets.size - 1
         loose = if (sets.isEmpty()) null else accel.triangles(sets)
 
+        // The spheres a ray may hit - not the volumes' boundaries or the lights' stand-ins - by
+        // their boxes, which take in a moving sphere's whole path: where it starts and where it ends.
+        val boxes = FloatArray(s.sceneSpheres.size * 6)
+        s.sceneSpheres.forEachIndexed { k, sphere ->
+            val at = sphere * SceneBuffers.SPHERE_STRIDE
+            val r = s.spheres[at + 6]
+            for (axis in 0 until 3) {
+                val start = s.spheres[at + axis]
+                val end = start + s.spheres[at + 3 + axis]
+                boxes[k * 6 + axis] = minOf(start, end) - r
+                boxes[k * 6 + 3 + axis] = maxOf(start, end) + r
+            }
+        }
+        sphereIds = keep(DeviceMemory.upload(s.sceneSpheres))
+        spheres = if (boxes.isEmpty()) null else accel.customPrimitives(boxes)
+
         // What shading needs to know of each placed mesh (the kernel's Instance), and the
         // materials of the meshes' own palettes, one after another.
         val paletteEntries = ArrayList<Int>()
@@ -257,9 +276,9 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         palette = keep(DeviceMemory.upload(paletteEntries.toIntArray()))
 
         // The tree of the scene: one instance per placed mesh, where it stands, hits going to
-        // the mesh program (the first hit record); and one for the loose surfaces, unmoved,
-        // whose two inputs take the records after it.
-        val count = s.instances.size + if (loose != null) 1 else 0
+        // the mesh program (the first hit record); one for the loose surfaces, unmoved, whose two
+        // inputs take the records after it; and one for the spheres, whose record is the last.
+        val count = s.instances.size + (if (loose != null) 1 else 0) + (if (spheres != null) 1 else 0)
         layout.struct("OptixInstance", count).use { records ->
             s.instances.forEachIndexed { i, instance ->
                 // A point p of the mesh goes to scale * turn(p) + offset, turning as PlacedMesh does:
@@ -278,6 +297,13 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
                 val i = s.instances.size
                 IDENTITY.forEachIndexed { e, value -> records.float("transform", value, i, e) }
                 records.int("instanceId", i, i).int("sbtOffset", 1, i).int("visibilityMask", 255, i)
+                    .int("flags", layout.constant("OPTIX_INSTANCE_FLAG_NONE").toInt(), i)
+                    .long("traversableHandle", tree.handle, i)
+            }
+            spheres?.let { tree ->
+                val i = count - 1
+                IDENTITY.forEachIndexed { e, value -> records.float("transform", value, i, e) }
+                records.int("instanceId", i, i).int("sbtOffset", HIT_SPHERE_RECORD, i).int("visibilityMask", 255, i)
                     .int("flags", layout.constant("OPTIX_INSTANCE_FLAG_NONE").toInt(), i)
                     .long("traversableHandle", tree.handle, i)
             }
@@ -322,6 +348,8 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
     private fun releaseScene() {
         loose?.let { DeviceMemory.free(it.memory) }
         loose = null
+        spheres?.let { DeviceMemory.free(it.memory) }
+        spheres = null
         top?.let { DeviceMemory.free(it.memory) }
         top = null
         sceneMemory.forEach { DeviceMemory.free(it) }
@@ -338,20 +366,26 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // -Drt.optix.ptx hands OptiX PTX, the older form, instead of OptiX IR.
         val program = cuda.buildOptixProgram(GpuRenderer.cudaKernelSource(), options, ptx = System.getProperty("rt.optix.ptx") != null)
         val compiled = System.nanoTime()
+        // Spheres take a program group of their own, and OptiX must be told it meets primitives
+        // other than triangles; a scene without them keeps the pipeline it always had.
+        val traceSpheres = defines.contains(SPHERES_DEFINE)
+        val groupCount = if (traceSpheres) GROUPS_WITH_SPHERES else GROUPS
+        val primitiveTypes = layout.constant("OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE") or
+            (if (traceSpheres) layout.constant("OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM") else 0L)
         val moduleOptions = layout.struct("OptixModuleCompileOptions")
         val pipelineOptions = layout.struct("OptixPipelineCompileOptions")
             .int("traversableGraphFlags", layout.constant("OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING").toInt())
             .int("numPayloadValues", PAYLOAD_VALUES)
             .int("numAttributeValues", 2)
             .long("pipelineLaunchParamsVariableName", name("params"))
-            .int("usesPrimitiveTypeFlags", layout.constant("OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE").toInt())
-        val descriptions = layout.struct("OptixProgramGroupDesc", GROUPS)
+            .int("usesPrimitiveTypeFlags", primitiveTypes.toInt())
+        val descriptions = layout.struct("OptixProgramGroupDesc", groupCount)
         val groupOptions = layout.struct("OptixProgramGroupOptions")
         val link = layout.struct("OptixPipelineLinkOptions").int("maxTraceDepth", 1)
         val stack = layout.struct("OptixStackSizes")
-        val groupHandles = MemoryUtil.memAllocPointer(GROUPS)
+        val groupHandles = MemoryUtil.memAllocPointer(groupCount)
         var module = 0L
-        val groups = LongArray(GROUPS)
+        val groups = LongArray(groupCount)
         var linked = 0L
         try {
             module = out { address ->
@@ -367,13 +401,18 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
                 .long("hitgroup.moduleCH", module, HIT_MESH).long("hitgroup.entryFunctionNameCH", name("__closesthit__mesh"), HIT_MESH)
             descriptions.int("kind", layout.constant("OPTIX_PROGRAM_GROUP_KIND_HITGROUP").toInt(), HIT_SURFACE)
                 .long("hitgroup.moduleCH", module, HIT_SURFACE).long("hitgroup.entryFunctionNameCH", name("__closesthit__surface"), HIT_SURFACE)
-            OptixApi.callWithLog("optixProgramGroupCreate") { log, logSize ->
-                arrayOf(context, descriptions.address, GROUPS, groupOptions.address, log, logSize, MemoryUtil.memAddress(groupHandles))
+            if (traceSpheres) {
+                descriptions.int("kind", layout.constant("OPTIX_PROGRAM_GROUP_KIND_HITGROUP").toInt(), HIT_SPHERE)
+                    .long("hitgroup.moduleIS", module, HIT_SPHERE).long("hitgroup.entryFunctionNameIS", name("__intersection__sphere"), HIT_SPHERE)
+                    .long("hitgroup.moduleCH", module, HIT_SPHERE).long("hitgroup.entryFunctionNameCH", name("__closesthit__sphere"), HIT_SPHERE)
             }
-            for (i in 0 until GROUPS) groups[i] = groupHandles.get(i)
+            OptixApi.callWithLog("optixProgramGroupCreate") { log, logSize ->
+                arrayOf(context, descriptions.address, groupCount, groupOptions.address, log, logSize, MemoryUtil.memAddress(groupHandles))
+            }
+            for (i in 0 until groupCount) groups[i] = groupHandles.get(i)
             linked = out { address ->
                 OptixApi.callWithLog("optixPipelineCreate") { log, logSize ->
-                    arrayOf(context, pipelineOptions.address, link.address, MemoryUtil.memAddress(groupHandles), GROUPS, log, logSize, address)
+                    arrayOf(context, pipelineOptions.address, link.address, MemoryUtil.memAddress(groupHandles), groupCount, log, logSize, address)
                 }
             }
 
@@ -390,17 +429,18 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             OptixApi.call("optixPipelineSetStackSize", linked, 0, 0, continuation, 2)
 
             // The table: one record each for ray generation and miss; for hits, the mesh program's
-            // record, then the surface program's for each input of the loose surfaces' tree.
-            // The records carry no data.
+            // record, then the surface program's for each input of the loose surfaces' tree, then
+            // the spheres' (HIT_SPHERE_RECORD). The records carry no data.
             val header = layout.constant("OPTIX_SBT_RECORD_HEADER_SIZE").toInt()
-            val hits = 3
+            val hits = if (traceSpheres) HIT_SPHERE_RECORD + 1 else HIT_SPHERE_RECORD
             val host = MemoryUtil.memCalloc(header * (2 + hits))
             val records = try {
                 val base = MemoryUtil.memAddress(host)
                 OptixApi.call("optixSbtRecordPackHeader", groups[RAYGEN], base)
                 OptixApi.call("optixSbtRecordPackHeader", groups[MISS], base + header)
                 OptixApi.call("optixSbtRecordPackHeader", groups[HIT_MESH], base + header * 2L)
-                for (h in 1 until hits) OptixApi.call("optixSbtRecordPackHeader", groups[HIT_SURFACE], base + header * (2L + h))
+                for (h in 1 until HIT_SPHERE_RECORD) OptixApi.call("optixSbtRecordPackHeader", groups[HIT_SURFACE], base + header * (2L + h))
+                if (traceSpheres) OptixApi.call("optixSbtRecordPackHeader", groups[HIT_SPHERE], base + header * (2L + HIT_SPHERE_RECORD))
                 DeviceMemory.upload(host)
             } finally {
                 MemoryUtil.memFree(host)
@@ -453,25 +493,35 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
 
     companion object {
         /** Why the OptiX engine cannot trace [scene] - what it holds that is not built yet - or null when it can. */
+        /** The scene's feature switches, and whether OptiX meets spheres in it: that changes the pipeline. */
+        private fun definesFor(scene: InstancedScene): String =
+            scene.kernelDefines() + if (scene.sceneSpheres.isNotEmpty()) " $SPHERES_DEFINE" else ""
+
         fun unsupported(scene: InstancedScene): String? = when {
-            scene.sceneSpheres.isNotEmpty() || scene.mediumCount > 0 -> "the OptiX engine does not trace spheres or fog yet"
-            scene.sceneTriangles == 0 && scene.sceneQuads.isEmpty() && scene.instances.isEmpty() ->
+            scene.mediumCount > 0 -> "the OptiX engine does not trace fog yet"
+            scene.sceneTriangles == 0 && scene.sceneQuads.isEmpty() && scene.sceneSpheres.isEmpty() && scene.instances.isEmpty() ->
                 "the scene has nothing the OptiX engine can trace"
             else -> null
         }
 
-        /** The kernel's Params: 27 pointers and 64-bit numbers, then 10 numbers of 32 bits - a multiple of 8 as it is. */
+        /** The kernel's Params: 29 pointers and 64-bit numbers, then 10 numbers of 32 bits - a multiple of 8 as it is. */
         private const val PARAMS_PADDING = 0
-        private const val PARAMS_BYTES = 28 * 8 + 10 * 4 + PARAMS_PADDING
+        private const val PARAMS_BYTES = 29 * 8 + 10 * 4 + PARAMS_PADDING
         /** The kernel's Instance: three pointers, then six numbers of 32 bits. */
         private const val INSTANCE_BYTES = 3 * 8 + 6 * 4
-        /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance. */
-        private const val PAYLOAD_VALUES = 6
+        /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance; and the ray's time, which it is handed. */
+        private const val PAYLOAD_VALUES = 7
         private const val GROUPS = 4
+        private const val GROUPS_WITH_SPHERES = 5
         private const val RAYGEN = 0
         private const val MISS = 1
         private const val HIT_MESH = 2
         private const val HIT_SURFACE = 3
+        private const val HIT_SPHERE = 4
+        /** The spheres' hit record, after the mesh's and the two of the loose surfaces' inputs. */
+        private const val HIT_SPHERE_RECORD = 3
+        /** Added to the scene's feature switches when it has spheres to hit, so their pipeline is built anew. */
+        private const val SPHERES_DEFINE = "-DOPTIX_SPHERES=1"
         private val STACK_FIELDS = listOf("cssRG", "cssMS", "cssCH", "cssAH", "cssIS", "cssCC", "dssDC")
         /** A quad as two triangles, in units of its two edges: Q, Q+u, Q+u+v and Q, Q+u+v, Q+v. */
         private val QUAD_CORNERS = listOf(0f to 0f, 1f to 0f, 1f to 1f, 0f to 0f, 1f to 1f, 0f to 1f)
