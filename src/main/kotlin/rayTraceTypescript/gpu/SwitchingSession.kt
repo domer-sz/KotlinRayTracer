@@ -7,7 +7,8 @@ import rayTraceTypescript.render.CameraSetup
  * One card that traces through OptiX whenever the scene is something the OptiX engine takes, and
  * through the CUDA kernel when it is not: what `auto` means on a card with RT cores. The engine
  * is chosen anew each time the scene is replaced; changing it starts the outputs afresh, as a
- * new scene does for its callers anyway.
+ * new scene does for its callers anyway. Since OptiX traces spheres and fog, the only scene it
+ * leaves to the CUDA kernel is one of nothing but fog, which gives it no tree to build.
  */
 internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, private val maxPixels: Int) : GpuSession {
     private var current: GpuSession = openFor(scene)
