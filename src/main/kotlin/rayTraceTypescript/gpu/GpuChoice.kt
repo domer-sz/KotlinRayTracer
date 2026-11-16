@@ -78,7 +78,8 @@ data class GpuChoice(val gpus: String = ALL, val backend: String = AUTO, val den
             System.getProperty("rt.gpus") ?: CudaContext.deviceFilter() ?: ALL,
             System.getProperty("rt.backend") ?: AUTO,
             try {
-                GpuRenderer.optixDenoiserCard()
+                // Quietly: the denoiser says where it runs when it starts.
+                GpuRenderer.optixDenoiserCard(quiet = true)
             } catch (t: Throwable) {
                 null
             }

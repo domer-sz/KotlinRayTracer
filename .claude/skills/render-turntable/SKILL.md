@@ -97,7 +97,7 @@ monitor has happened before.
 | `-Drt.samples` | scene's (64 in studio-model) | samples per pixel per frame; time scales with it |
 | `-Drt.width` / `-Drt.aspect` | scene's (1080, 9:16) | frame size; must come out even |
 | `-Drt.denoise=off` | on | raw frames |
-| `-Drt.upscale=2` | off | trace at half size, OptiX enlarges while denoising (RTX only): ~2.6x faster, softer fine detail |
+| `-Drt.upscale` | 2 | trace at half size, OptiX enlarges while denoising (on the RTX): ~3x faster, softer fine detail; `off` renders at full size |
 | `-Drt.smooth=off` | on | flat facets instead of smooth shading (films before 2026-11-15 were flat) |
 | `-Drt.firefly` | 16 (studio-model: 16 x its exposure) | the brightest a sample may be; `off` lets every sample through |
 | `-Drt.studio.turn` | 0 | studio-model: the figure's starting angle (degrees) |
@@ -159,8 +159,8 @@ that day, and a denoised still at angle 0 now sits 31.8 dB / SSIM 0.914 from v4'
     0.50 s a frame (30 frames, twice: tracing 405 / 407 ms, guides 70 ms against 87 before);
     `-Drt.upscale=2` (540x960 traced, OptiX UPSCALE2X on the RTX 2060, the GTX 1070 idle): 0.19 s a
     frame (trace 140 ms, guides 22 ms; denoising 71 ms beside it), ~1.4 min for 450 frames; frame 0
-    sits 29.1 dB from the full-size film's, softer in the face and lacing - ask before using it
-    for a published film;
+    sits 29.1 dB from the full-size film's, softer in the face and lacing. The default since 2026-11-16 (the user chose it);
+    `-Drt.upscale=off` renders at full size;
   - `-Drt.denoiser=oidn` (as all films before this day): 1.51 s a frame, of it 893 ms waiting for
     OIDN on the CPU (1447 ms a frame);
   - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.

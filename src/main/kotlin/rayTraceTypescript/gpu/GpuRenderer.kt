@@ -133,8 +133,13 @@ class GpuRenderer : Renderer {
          * cannot start gives way to OIDN; without OIDN's DLLs either (see [Denoiser.folder]) the
          * render still runs, just without denoising.
          */
-        /** -Drt.upscale=2: trace at half the width and height, and have the OptiX denoiser enlarge the image twice. */
-        fun upscaleWanted(): Boolean = System.getProperty("rt.upscale") == "2"
+        /**
+         * Whether to trace at half the width and height and have the OptiX denoiser enlarge the
+         * image twice: the default for denoised stills and films (-Drt.upscale=2), off with
+         * -Drt.upscale=off (or 1). It renders a Yennefer film frame in 0.16 s instead of 0.50,
+         * with softer fine detail.
+         */
+        fun upscaleWanted(): Boolean = System.getProperty("rt.upscale")?.trim()?.lowercase()?.let { it == "2" || it == "on" || it == "true" } ?: true
 
         /**
          * Whether OptiX's enlarging model (UPSCALE2X) works on [card]. On a GTX 1070 (Pascal, sm_61)
@@ -182,7 +187,7 @@ class GpuRenderer : Renderer {
          * trace best: beside an RTX card that traces, a second card would sit idle. On a machine
          * of one card, that card does both.
          */
-        fun optixDenoiserCard(upscaling: Boolean = upscaleWanted()): GpuDevice? {
+        fun optixDenoiserCard(upscaling: Boolean = upscaleWanted(), quiet: Boolean = false): GpuDevice? {
             if (System.getProperty("rt.denoise")?.let { it != "off" } != true || optixDenoiserFailed) return null
             val mode = System.getProperty("rt.denoiser")?.lowercase() ?: GpuChoice.AUTO
             if (mode == "oidn") return null
@@ -200,7 +205,7 @@ class GpuRenderer : Renderer {
             if (upscaling && !canUpscale(card)) {
                 // The enlarging model gives a broken image on a GTX 1070, with no error: take a card it works on.
                 devices.filter(::canUpscale).maxByOrNull { if (it.ordinal == tracer.ordinal) 1 else 0 }?.let { able ->
-                    System.err.println("[gpu] -Drt.upscale=2: OptiX enlarges wrongly on ${card.shortName}; denoising on ${able.shortName}")
+                    if (!quiet) System.err.println("[gpu] -Drt.upscale=2: OptiX enlarges wrongly on ${card.shortName}; denoising on ${able.shortName}")
                     return able
                 }
             }
