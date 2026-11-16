@@ -636,6 +636,8 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
 
 #if RT_OPTIX
 
+#define OPTIX_RAY_END 1e16f
+
 // The closest hit, asked of OptiX. It comes back in the ray's payload as the closest-hit
 // programs at the end of this file fill it: what was hit, where along the ray, a triangle's
 // barycentric coordinates - which are the u/v triangle_t reports - and, for a placed mesh,
@@ -644,7 +646,9 @@ __device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float
                       float tMin, float tMax, Rng* rng, HitRecord* rec) {
     // The ray's time rides along in the last value, for the spheres' intersection program to move them by.
     unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u, instance = 0u, rayTime = __float_as_uint(time);
-    optixTrace(params.handle, origin, direction, tMin, tMax, 0.0f, OptixVisibilityMask(255),
+    // OptiX takes a ray reaching to infinity as invalid (its validation mode stops on it), so the
+    // search ends at a distance no scene comes near.
+    optixTrace(params.handle, origin, direction, tMin, fminf(tMax, OPTIX_RAY_END), 0.0f, OptixVisibilityMask(255),
                OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v, instance, rayTime);
     // Fog: OptiX found the nearest surface, and a volume may stop the ray before it. Its
     // boundary is a small tree medium_t searches itself, and a scene has a volume or two.
