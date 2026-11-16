@@ -28,17 +28,20 @@ class GpuRenderer : Renderer {
                 "${laid.sceneQuads.size} quads, ${laid.sceneSpheres.size} spheres, ${laid.mediumCount} volumes)"
         )
         val denoiser = requestedDenoiser()
+        // A denoiser that enlarges twice (-Drt.upscale=2) is handed a half-size image: the raw
+        // render is written at that size, the denoised one at the full.
+        val traced = if (denoiser?.upscale == 2 && System.getProperty("rt.aov") == null) setup.halved() else setup
 
-        GpuSession.open(scene, setup.totalPixels).use { session ->
-            session.setCamera(setup)
+        GpuSession.open(scene, traced.totalPixels).use { session ->
+            session.setCamera(traced)
             // -Drt.aov=albedo|normal renders a denoiser guide instead of the image.
             val mainMode = when (System.getProperty("rt.aov")) {
                 "albedo" -> GpuSession.MODE_ALBEDO
                 "normal" -> GpuSession.MODE_NORMAL
                 else -> GpuSession.MODE_IMAGE
             }
-            val pixels = renderAll(session, setup, mainMode, setup.samplesPerPixel, GpuSession.IMAGE)
-            PpmWriter.write(outputPath, setup.imageWidth, setup.imageHeight, pixels)
+            val pixels = renderAll(session, traced, mainMode, setup.samplesPerPixel, GpuSession.IMAGE)
+            PpmWriter.write(outputPath, traced.imageWidth, traced.imageHeight, pixels)
 
             if (denoiser != null && mainMode == GpuSession.MODE_IMAGE) {
                 denoiser.use {
@@ -46,14 +49,14 @@ class GpuRenderer : Renderer {
                     // clean; the denoiser needs them antialiased like the image, not more.
                     val guideSamples = minOf(setup.samplesPerPixel, GUIDE_SAMPLES)
                     val start = System.nanoTime()
-                    val (albedo, normal) = renderGuides(session, setup, guideSamples)
+                    val (albedo, normal) = renderGuides(session, traced, guideSamples)
                     System.err.println("[gpu] guides: ${(System.nanoTime() - start) / 1_000_000} ms")
                     // -Drt.denoise.repeat=N denoises the image N times more, to time a denoiser once it is set up.
                     val runs = 1 + (System.getProperty("rt.denoise.repeat")?.toIntOrNull() ?: 0).coerceIn(0, 100)
                     var clean = pixels
                     repeat(runs) { run ->
                         val start = System.nanoTime()
-                        clean = it.denoise(setup.imageWidth, setup.imageHeight, pixels, albedo, normal)
+                        clean = it.denoise(traced.imageWidth, traced.imageHeight, pixels, albedo, normal)
                         val parts = (it as? OptixDenoiser)?.lastTimes?.let { t ->
                             ": up %.1f ms, denoiser %.1f ms, back %.1f ms, setting up %.1f ms".format(t.uploadMs, t.denoiseMs, t.downloadMs, t.setupMs)
                         } ?: ""
@@ -64,7 +67,7 @@ class GpuRenderer : Renderer {
             }
         }
 
-        return setup.totalPixels.toLong() * setup.samplesPerPixel
+        return traced.totalPixels.toLong() * setup.samplesPerPixel
     }
 
     /**
@@ -130,18 +133,31 @@ class GpuRenderer : Renderer {
          * cannot start gives way to OIDN; without OIDN's DLLs either (see [Denoiser.folder]) the
          * render still runs, just without denoising.
          */
-        fun requestedDenoiser(): ImageDenoiser? {
+        /** -Drt.upscale=2: trace at half the width and height, and have the OptiX denoiser enlarge the image twice. */
+        fun upscaleWanted(): Boolean = System.getProperty("rt.upscale") == "2"
+
+        /**
+         * Whether OptiX's enlarging model (UPSCALE2X) works on [card]. On a GTX 1070 (Pascal, sm_61)
+         * it returns a smeared image with ghost edges and no error - worse than bicubic enlarging -
+         * while the ordinary model gives the same image as on the RTX 2060 (sm_75), where it works.
+         */
+        fun canUpscale(card: GpuDevice): Boolean = card.computeCapability >= 70
+
+        fun requestedDenoiser(allowUpscale: Boolean = true): ImageDenoiser? {
             val wanted = System.getProperty("rt.denoise")?.let { it != "off" } ?: false
             if (!wanted) return null
-            optixDenoiserCard()?.let { card ->
+            optixDenoiserCard(allowUpscale && upscaleWanted())?.let { card ->
                 try {
-                    return OptixDenoiser(card)
+                    val upscaling = allowUpscale && upscaleWanted()
+                    if (upscaling && !canUpscale(card)) System.err.println("[gpu] -Drt.upscale=2: no card here enlarges right; rendering at full size")
+                    return OptixDenoiser(card, upscaling = upscaling && canUpscale(card))
                 } catch (t: Throwable) {
                     // From now on no card is kept for a denoiser that is not there.
                     optixDenoiserFailed = true
                     System.err.println("[gpu] the OptiX denoiser could not start on ${card.shortName} (${t.message}); denoising with OIDN on the CPU")
                 }
             }
+            if (allowUpscale && upscaleWanted()) System.err.println("[gpu] -Drt.upscale=2 needs the OptiX denoiser; rendering at full size")
             val folder = Denoiser.folder()
             if (folder == null) {
                 System.err.println("[gpu] -Drt.denoise: no OpenImageDenoise.dll in -Drt.oidn / OIDN_DIR, rendering without denoising")
@@ -166,7 +182,7 @@ class GpuRenderer : Renderer {
          * trace best: beside an RTX card that traces, a second card would sit idle. On a machine
          * of one card, that card does both.
          */
-        fun optixDenoiserCard(): GpuDevice? {
+        fun optixDenoiserCard(upscaling: Boolean = upscaleWanted()): GpuDevice? {
             if (System.getProperty("rt.denoise")?.let { it != "off" } != true || optixDenoiserFailed) return null
             val mode = System.getProperty("rt.denoiser")?.lowercase() ?: GpuChoice.AUTO
             if (mode == "oidn") return null
@@ -177,11 +193,18 @@ class GpuRenderer : Renderer {
                 optixDenoiserFailed = true
                 return null
             }
-            System.getProperty("rt.denoiser.gpu")?.takeIf { it.isNotBlank() }?.let { named ->
-                return GpuChoice(named, "cuda").resolve(devices, null).first().device
-            }
             val tracer = GpuChoice(GpuChoice.ONE).resolve(devices, optixReason).single().device
-            return devices.firstOrNull { it.ordinal != tracer.ordinal } ?: tracer
+            val card = System.getProperty("rt.denoiser.gpu")?.takeIf { it.isNotBlank() }?.let { named ->
+                GpuChoice(named, "cuda").resolve(devices, null).first().device
+            } ?: devices.firstOrNull { it.ordinal != tracer.ordinal } ?: tracer
+            if (upscaling && !canUpscale(card)) {
+                // The enlarging model gives a broken image on a GTX 1070, with no error: take a card it works on.
+                devices.filter(::canUpscale).maxByOrNull { if (it.ordinal == tracer.ordinal) 1 else 0 }?.let { able ->
+                    System.err.println("[gpu] -Drt.upscale=2: OptiX enlarges wrongly on ${card.shortName}; denoising on ${able.shortName}")
+                    return able
+                }
+            }
+            return card
         }
     }
 }

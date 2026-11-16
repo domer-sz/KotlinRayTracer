@@ -693,7 +693,8 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         var capacity = 0
         var openedOn: rayTraceTypescript.gpu.GpuChoice? = null
         try {
-            GpuRenderer.requestedDenoiser().use { denoiser ->
+            // The viewer denoises its own images at their size: no enlarging (-Drt.upscale) here.
+            GpuRenderer.requestedDenoiser(allowUpscale = false).use { denoiser ->
                 // The card kept for denoising is the one the denoiser actually started on: if
                 // OptiX gave way to OIDN, no card sits out of the tracing for it.
                 gpuChoice = gpuChoice.copy(denoising = (denoiser as? rayTraceTypescript.gpu.optix.OptixDenoiser)?.device)

@@ -119,6 +119,8 @@ object TurntableFilm {
     ): Boolean {
         val width = setup.imageWidth
         val height = setup.imageHeight
+        // A denoiser that enlarges twice is handed frames traced at half the width and height.
+        val traced = if (denoiser?.upscale == 2) setup.halved() else setup
         val frames = settings.framesPerTurn
         val encoder = VideoEncoder.start(
             output, width, height, settings.fps,
@@ -139,12 +141,12 @@ object TurntableFilm {
                 val traceStart = System.nanoTime()
                 val seed = baseSeed ?: session.seed.also { baseSeed = it }
                 session.seed = seed + frame
-                session.setCamera(setup)
-                session.traceSliced(GpuSession.MODE_IMAGE, setup, settings.samples, GpuSession.IMAGE, SLICE_MS)
-                val image = FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.IMAGE, it) }
+                session.setCamera(traced)
+                session.traceSliced(GpuSession.MODE_IMAGE, traced, settings.samples, GpuSession.IMAGE, SLICE_MS)
+                val image = FloatArray(traced.totalPixels * 3).also { session.read(GpuSession.IMAGE, it) }
                 val guideStart = System.nanoTime()
                 val guides = denoiser?.let {
-                    GpuRenderer.renderGuides(session, setup, minOf(settings.samples, GUIDE_SAMPLES), SLICE_MS)
+                    GpuRenderer.renderGuides(session, traced, minOf(settings.samples, GUIDE_SAMPLES), SLICE_MS)
                 }
                 val waitStart = System.nanoTime()
                 // The frame before must be in the film before this one goes after it.
@@ -154,7 +156,7 @@ object TurntableFilm {
                 pending = worker.submit {
                     val denoiseStart = System.nanoTime()
                     val clean = if (denoiser != null && guides != null) {
-                        denoiser.denoise(width, height, image, guides.first, guides.second)
+                        denoiser.denoise(traced.imageWidth, traced.imageHeight, image, guides.first, guides.second)
                     } else image
                     val encodeStart = System.nanoTime()
                     encoder.write(clean)

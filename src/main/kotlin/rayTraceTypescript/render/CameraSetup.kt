@@ -27,4 +27,19 @@ data class CameraSetup(
     val fireflyClamp: Float = 0.0f
 ) {
     val totalPixels: Int get() = imageWidth * imageHeight
+
+    /**
+     * The same view at half the width and height, each pixel covering a 2x2 block of this one's:
+     * its centre is the middle of the block. What a denoiser that enlarges twice is handed.
+     */
+    fun halved(): CameraSetup {
+        require(imageWidth % 2 == 0 && imageHeight % 2 == 0) { "a ${imageWidth}x$imageHeight image cannot be halved" }
+        return copy(
+            imageWidth = imageWidth / 2,
+            imageHeight = imageHeight / 2,
+            pixel00 = (pixel00 + pixelDeltaU * 0.5f + pixelDeltaV * 0.5f).let { Point(it.x, it.y, it.z) },
+            pixelDeltaU = pixelDeltaU * 2.0f,
+            pixelDeltaV = pixelDeltaV * 2.0f
+        )
+    }
 }

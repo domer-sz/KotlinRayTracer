@@ -49,6 +49,13 @@ object TurntableRender {
         }
 
         val denoiser = GpuRenderer.requestedDenoiser()
+        // Enlarging, the denoiser runs on the card that traces best, and the second card would only
+        // slow a film down: copying it each frame's scene for its CUDA kernel costs more than it
+        // traces of a quarter-size frame (Yennefer: 0.31 s a frame with both cards, 0.19 s without).
+        // -Drt.gpus still decides when it is given.
+        val choice = GpuChoice.fromProperties().let {
+            if (denoiser?.upscale == 2 && System.getProperty("rt.gpus") == null) it.copy(gpus = GpuChoice.ONE) else it
+        }
         try {
             var session: GpuSession? = null
             try {
@@ -56,7 +63,7 @@ object TurntableRender {
                     setup, settings, denoiser, output,
                     sessionFor = { frame ->
                         val buffers = buffersAt(frame)
-                        session?.also { it.replaceScene(buffers) } ?: GpuSession.open(buffers, setup.totalPixels).also { session = it }
+                        session?.also { it.replaceScene(buffers) } ?: GpuSession.open(buffers, setup.totalPixels, choice).also { session = it }
                     },
                     progress = { done, total, elapsed ->
                         val perFrame = elapsed / 1e9 / done

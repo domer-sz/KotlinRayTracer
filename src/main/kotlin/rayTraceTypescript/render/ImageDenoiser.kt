@@ -13,5 +13,12 @@ interface ImageDenoiser : AutoCloseable {
     /** What denoises and where, for a log or a status line: "OIDN (CPU)", "OptiX (GTX 1070)". */
     val name: String
 
+    /**
+     * How many times wider and taller the clean image comes back than the noisy one: 1, or 2 for
+     * OptiX's model that denoises and enlarges in one go (`-Drt.upscale=2`). The guides are at
+     * the noisy image's size.
+     */
+    val upscale: Int get() = 1
+
     fun denoise(width: Int, height: Int, color: FloatArray, albedo: FloatArray, normal: FloatArray): FloatArray
 }

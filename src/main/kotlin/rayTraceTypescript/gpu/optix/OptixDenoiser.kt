@@ -12,7 +12,8 @@ import java.nio.FloatBuffer
 
 /**
  * NVIDIA's OptiX denoiser on one card: the image and its two guides go up to the card, the
- * built-in AOV model - the one for single images - cleans the image, and it comes back.
+ * built-in AOV model - the one for single images - cleans the image, and it comes back. With
+ * [upscaling], the UPSCALE2X model instead cleans it and returns it twice as wide and tall.
  *
  * The model's weights come with the driver, like the rest of OptiX. It wants the normal guide
  * in world space on current drivers, which is what the kernel's normal guide holds, and works
@@ -21,8 +22,9 @@ import java.nio.FloatBuffer
  * It owns a CUDA context on [device] and makes it current on whichever thread calls it, so it
  * can work beside a session that traces on another card - or on the same one.
  */
-class OptixDenoiser(val device: GpuDevice) : ImageDenoiser {
-    override val name: String = "OptiX (${device.shortName})"
+class OptixDenoiser(val device: GpuDevice, upscaling: Boolean = false) : ImageDenoiser {
+    override val name: String = "OptiX (${device.shortName})" + if (upscaling) ", 2x" else ""
+    override val upscale: Int = if (upscaling) 2 else 1
 
     private val cuda = CudaContext.create(device)
     private lateinit var layout: OptixLayout
@@ -59,7 +61,7 @@ class OptixDenoiser(val device: GpuDevice) : ImageDenoiser {
                 options.int("guideAlbedo", 1).int("guideNormal", 1)
                     .int("denoiseAlpha", layout.constant("OPTIX_DENOISER_ALPHA_MODE_COPY").toInt())
                 out {
-                    OptixApi.call("optixDenoiserCreate", context, layout.constant("OPTIX_DENOISER_MODEL_KIND_AOV").toInt(), options.address, it)
+                    OptixApi.call("optixDenoiserCreate", context, layout.constant(if (upscaling) "OPTIX_DENOISER_MODEL_KIND_UPSCALE2X" else "OPTIX_DENOISER_MODEL_KIND_AOV").toInt(), options.address, it)
                 }
             }
         } catch (t: Throwable) {
@@ -89,7 +91,7 @@ class OptixDenoiser(val device: GpuDevice) : ImageDenoiser {
             image(guides, "albedo", images[ALBEDO], width, height)
             image(guides, "normal", images[NORMAL], width, height)
             image(layers, "input", images[COLOR], width, height)
-            image(layers, "output", images[OUTPUT], width, height)
+            image(layers, "output", images[OUTPUT], width * upscale, height * upscale)
             layers.int("type", layout.constant("OPTIX_DENOISER_AOV_TYPE_BEAUTY").toInt())
             OptixApi.call(
                 "optixDenoiserInvoke", denoiser, 0L, params.address, state, stateBytes,
@@ -102,7 +104,7 @@ class OptixDenoiser(val device: GpuDevice) : ImageDenoiser {
             layers.close()
         }
         val downloadStart = System.nanoTime()
-        val result = FloatArray(width * height * 3)
+        val result = FloatArray(width * height * 3 * upscale * upscale)
         host.clear()
         host.limit(result.size)
         CudaContext.check(cuMemcpyDtoH(host, images[OUTPUT]), "cuMemcpyDtoH(denoiser output)")
@@ -119,7 +121,9 @@ class OptixDenoiser(val device: GpuDevice) : ImageDenoiser {
         if (width == this.width && height == this.height) return
         releaseBuffers()
         layout.struct("OptixDenoiserSizes").use { sizes ->
-            OptixApi.call("optixDenoiserComputeMemoryResources", denoiser, width, height, sizes.address)
+            // Sized for the output - for the model that enlarges, twice as wide and tall as the input;
+            // the setup below takes the input's size.
+            OptixApi.call("optixDenoiserComputeMemoryResources", denoiser, width * upscale, height * upscale, sizes.address)
             stateBytes = sizes.readLong("stateSizeInBytes")
             scratchBytes = sizes.readLong("withoutOverlapScratchSizeInBytes")
         }
@@ -127,8 +131,9 @@ class OptixDenoiser(val device: GpuDevice) : ImageDenoiser {
         scratch = DeviceMemory.allocate(scratchBytes)
         OptixApi.call("optixDenoiserSetup", denoiser, 0L, width, height, state, stateBytes, scratch, scratchBytes)
         CudaContext.check(cuCtxSynchronize(), "optixDenoiserSetup (cuCtxSynchronize)")
-        images = LongArray(IMAGES) { DeviceMemory.allocate(width.toLong() * height * PIXEL_BYTES) }
-        staging = MemoryUtil.memAllocFloat(width * height * 3)
+        // The output is the enlarged image when the model enlarges; the rest are at the input's size.
+        images = LongArray(IMAGES) { DeviceMemory.allocate(width.toLong() * height * PIXEL_BYTES * if (it == OUTPUT) upscale * upscale else 1) }
+        staging = MemoryUtil.memAllocFloat(width * height * 3 * upscale * upscale)
         this.width = width
         this.height = height
     }
