@@ -130,7 +130,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // The root node is the CUDA kernel's: OptiX searches its own trees.
         paramsHost.putInt(setup.imageWidth).putInt(setup.imageHeight).putInt(sampleStart).putInt(count)
             .putInt(setup.maxReflectionDepth).putFloat(scale).putInt(0).putInt(scene.lightCount).putInt(quadInput)
-            .putFloat(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f)
+            .putFloat(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f).putInt(scene.mediumCount)
         check(paramsHost.position() == PARAMS_BYTES - PARAMS_PADDING) { "Params is ${paramsHost.position()} bytes, the kernel expects ${PARAMS_BYTES - PARAMS_PADDING}" }
         DeviceMemory.write(paramsBuffer, paramsHost)
 
@@ -498,15 +498,15 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             scene.kernelDefines() + if (scene.sceneSpheres.isNotEmpty()) " $SPHERES_DEFINE" else ""
 
         fun unsupported(scene: InstancedScene): String? = when {
-            scene.mediumCount > 0 -> "the OptiX engine does not trace fog yet"
             scene.sceneTriangles == 0 && scene.sceneQuads.isEmpty() && scene.sceneSpheres.isEmpty() && scene.instances.isEmpty() ->
-                "the scene has nothing the OptiX engine can trace"
+                // Fog alone leaves OptiX no tree to build; the CUDA kernel takes such a scene.
+                "the scene has no surface for OptiX's tree"
             else -> null
         }
 
-        /** The kernel's Params: 29 pointers and 64-bit numbers, then 10 numbers of 32 bits - a multiple of 8 as it is. */
-        private const val PARAMS_PADDING = 0
-        private const val PARAMS_BYTES = 29 * 8 + 10 * 4 + PARAMS_PADDING
+        /** The kernel's Params: 29 pointers and 64-bit numbers, then 11 numbers of 32 bits, padded to a multiple of 8 as the compiler pads it. */
+        private const val PARAMS_PADDING = 4
+        private const val PARAMS_BYTES = 29 * 8 + 11 * 4 + PARAMS_PADDING
         /** The kernel's Instance: three pointers, then six numbers of 32 bits. */
         private const val INSTANCE_BYTES = 3 * 8 + 6 * 4
         /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance; and the ray's time, which it is handed. */

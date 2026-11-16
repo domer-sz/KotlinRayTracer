@@ -325,6 +325,7 @@ struct Params {
     int lightCount;
     int quadInput;                       // which input of the tree of loose surfaces holds the quads; -1 without any
     float fireflyClamp;                  // the brightest a sample may be; 0 for no limit
+    int mediumCount;                     // the volumes, which world_hit tests after OptiX's search
 };
 
 extern "C" {
@@ -645,6 +646,20 @@ __device__ inline bool world_hit(const Scene* sc, int root, float3 origin, float
     unsigned int kind = 0u, index = 0u, t = 0u, u = 0u, v = 0u, instance = 0u, rayTime = __float_as_uint(time);
     optixTrace(params.handle, origin, direction, tMin, tMax, 0.0f, OptixVisibilityMask(255),
                OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0u, 1u, 0u, kind, index, t, u, v, instance, rayTime);
+    // Fog: OptiX found the nearest surface, and a volume may stop the ray before it. Its
+    // boundary is a small tree medium_t searches itself, and a scene has a volume or two.
+    if (HAS_MEDIA) {
+        float nearest = kind != 0u ? __uint_as_float(t) : tMax;
+        for (int m = 0; m < params.mediumCount; m++) {
+            float inside;
+            if (medium_t(sc, m, origin, direction, time, tMin, nearest, rng, &inside)) {
+                nearest = inside;
+                kind = (unsigned int)LEAF_MEDIUM;
+                index = (unsigned int)m;
+                t = __float_as_uint(inside);
+            }
+        }
+    }
     if (kind == 0u) return false;
 
     Closest found;
