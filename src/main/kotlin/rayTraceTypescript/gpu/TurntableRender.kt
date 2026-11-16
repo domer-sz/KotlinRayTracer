@@ -42,13 +42,16 @@ object TurntableRender {
             val degrees = settings.degrees(frame)
             val swaps = java.util.IdentityHashMap<Hittable, Hittable>()
             for (part in turning) {
-                swaps[part.hittable] = Placement.turned(part.hittable, axisX, axisZ, degrees)
+                swaps[part.hittable] = Placement.turned(part.hittable, axisX, axisZ, degrees, turning = true)
                 part.lightProxy?.let { swaps[it] = Placement.turned(it, axisX, axisZ, degrees) }
             }
             return SceneFlattener.scene(swapped(scene.world, swaps), camera.lights?.let { swapped(it, swaps) })
         }
 
-        val denoiser = GpuRenderer.requestedDenoiser()
+        // A temporal denoiser needs the flow guide, which follows placed meshes only.
+        val flowFollows = turning.all { it.hittable is PlacedMesh }
+        val denoiser = GpuRenderer.requestedDenoiser(temporal = flowFollows)
+        val turn = if (flowFollows) FrameTurn(axisX, axisZ, settings.degrees(1) - settings.degrees(0)) else null
         // Enlarging, the denoiser runs on the card that traces best, and the second card would only
         // slow a film down: copying it each frame's scene for its CUDA kernel costs more than it
         // traces of a quarter-size frame (Yennefer: 0.31 s a frame with both cards, 0.19 s without).
@@ -70,7 +73,8 @@ object TurntableRender {
                         System.err.print(
                             "\r[film] frame $done of $total, %.2f s a frame, about %.0f s left   ".format(perFrame, perFrame * (total - done))
                         )
-                    }
+                    },
+                    turn = turn
                 )
                 System.err.println()
                 if (done) println("Film saved: ${output.toAbsolutePath()}")

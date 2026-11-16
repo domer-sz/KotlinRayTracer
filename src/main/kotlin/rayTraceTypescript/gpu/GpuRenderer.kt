@@ -148,14 +148,26 @@ class GpuRenderer : Renderer {
          */
         fun canUpscale(card: GpuDevice): Boolean = card.computeCapability >= 70
 
-        fun requestedDenoiser(allowUpscale: Boolean = true): ImageDenoiser? {
+        /**
+         * -Drt.temporal=on: a film whose turning parts are all placed meshes is denoised by OptiX's
+         * temporal model, which carries each frame into the next along the flow guide. Off by
+         * default: on the gold Yennefer in fog (40 frames against 512 spp) it halved the background's
+         * flicker at 16 spp but cost the figure 1 dB, and at 64 spp cost it 2.3 dB for 10% less
+         * flicker - gold's highlights come from the still lamps and do not follow the flow, so they
+         * smear. A trust map that kept the flow off metal saved the figure but made the background
+         * flicker more. Only on a card where the enlarging model works: the temporal models have not
+         * been checked on a GTX 1070, where that one fails without a word.
+         */
+        fun temporalWanted(): Boolean = System.getProperty("rt.temporal")?.trim()?.lowercase()?.let { it == "on" || it == "true" } ?: false
+
+        fun requestedDenoiser(allowUpscale: Boolean = true, temporal: Boolean = false): ImageDenoiser? {
             val wanted = System.getProperty("rt.denoise")?.let { it != "off" } ?: false
             if (!wanted) return null
             optixDenoiserCard(allowUpscale && upscaleWanted())?.let { card ->
                 try {
                     val upscaling = allowUpscale && upscaleWanted()
                     if (upscaling && !canUpscale(card)) System.err.println("[gpu] -Drt.upscale=2: no card here enlarges right; rendering at full size")
-                    return OptixDenoiser(card, upscaling = upscaling && canUpscale(card))
+                    return OptixDenoiser(card, upscaling = upscaling && canUpscale(card), temporal = temporal && temporalWanted() && canUpscale(card))
                 } catch (t: Throwable) {
                     // From now on no card is kept for a denoiser that is not there.
                     optixDenoiserFailed = true

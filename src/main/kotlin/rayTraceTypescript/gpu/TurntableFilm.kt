@@ -102,11 +102,22 @@ object TurntableFilm {
     const val GUIDE_SAMPLES = 32
     /** Length each launch is aimed at; StlViewer settled on 100 ms after two driver resets. */
     const val SLICE_MS = 100.0
+    /**
+     * Frames from the end of the turn denoised, and thrown away, before frame 0 when the denoiser
+     * is temporal: frame 0 then starts with the history the last frame ends with, so the film
+     * does not jump where it loops - in its copied turns, and in a Reel played round and round.
+     */
+    const val PRIMING_FRAMES = 8
 
     /**
      * Renders the film into [output]. [sessionFor] readies the GPU for a frame - the figure turned
      * to that frame's angle - and returns the session to trace it in. Returns false, writing
      * nothing, when [cancelled] says so between frames; a failure throws and writes nothing either.
+     *
+     * [turn] is how the placed meshes ([rayTraceTypescript.gpu.PlacedMesh.turning]) turn from one
+     * frame to the next, when only they turn. With it, a temporal denoiser gets the flow guide and
+     * carries each frame into the next; without it, or with a session that cannot trace the flow,
+     * every frame is denoised alone.
      */
     fun render(
         setup: CameraSetup,
@@ -115,7 +126,8 @@ object TurntableFilm {
         output: Path,
         sessionFor: (frame: Int) -> GpuSession,
         cancelled: () -> Boolean = { false },
-        progress: FilmProgress = FilmProgress { _, _, _ -> }
+        progress: FilmProgress = FilmProgress { _, _, _ -> },
+        turn: FrameTurn? = null
     ): Boolean {
         val width = setup.imageWidth
         val height = setup.imageHeight
@@ -134,10 +146,18 @@ object TurntableFilm {
         val timing = FrameTiming()
         try {
             var baseSeed: Long? = null
-            for (frame in 0 until frames) {
+            val temporal = denoiser?.temporal == true && turn != null
+            // With a temporal denoiser, the last frames of the turn first, to give frame 0 a history.
+            val priming = if (temporal) (frames - minOf(PRIMING_FRAMES, frames - 1) until frames).toList() else emptyList()
+            val order = priming + (0 until frames)
+            for ((step, frame) in order.withIndex()) {
                 if (cancelled()) break
+                val primingStep = step < priming.size
                 val sceneStart = System.nanoTime()
                 val session = sessionFor(frame)
+                // Frame to frame, only in step: a session that cannot trace the flow gets no history.
+                val flowing = temporal && session.tracesFlow
+                session.setTurn(if (flowing) turn else null)
                 val traceStart = System.nanoTime()
                 val seed = baseSeed ?: session.seed.also { baseSeed = it }
                 session.seed = seed + frame
@@ -148,18 +168,24 @@ object TurntableFilm {
                 val guides = denoiser?.let {
                     GpuRenderer.renderGuides(session, traced, minOf(settings.samples, GUIDE_SAMPLES), SLICE_MS)
                 }
+                val flow = if (flowing) FloatArray(traced.totalPixels * 3).also { session.read(GpuSession.FLOW, it) } else null
                 val waitStart = System.nanoTime()
                 // The frame before must be in the film before this one goes after it.
                 pending?.get()
                 timing.renderThread(traceStart - sceneStart, guideStart - traceStart, waitStart - guideStart, System.nanoTime() - waitStart)
-                if (frame > 0) progress.report(frame, frames, System.nanoTime() - start)
+                if (!primingStep && frame > 0) progress.report(frame, frames, System.nanoTime() - start)
                 pending = worker.submit {
                     val denoiseStart = System.nanoTime()
-                    val clean = if (denoiser != null && guides != null) {
-                        denoiser.denoise(traced.imageWidth, traced.imageHeight, image, guides.first, guides.second)
-                    } else image
+                    val clean = when {
+                        denoiser == null || guides == null -> image
+                        flow != null -> denoiser.denoiseNext(
+                            traced.imageWidth, traced.imageHeight, image, guides.first, guides.second, flow, continuing = step > 0
+                        )
+                        else -> denoiser.denoise(traced.imageWidth, traced.imageHeight, image, guides.first, guides.second)
+                    }
                     val encodeStart = System.nanoTime()
-                    encoder.write(clean)
+                    // A priming frame only builds the history.
+                    if (!primingStep) encoder.write(clean)
                     timing.worker(encodeStart - denoiseStart, System.nanoTime() - encodeStart)
                 }
             }

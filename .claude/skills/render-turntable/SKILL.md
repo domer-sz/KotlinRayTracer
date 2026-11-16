@@ -98,6 +98,7 @@ monitor has happened before.
 | `-Drt.width` / `-Drt.aspect` | scene's (1080, 9:16) | frame size; must come out even |
 | `-Drt.denoise=off` | on | raw frames |
 | `-Drt.upscale` | 2 | trace at half size, OptiX enlarges while denoising (on the RTX): ~3x faster, softer fine detail; `off` renders at full size |
+| `-Drt.temporal` | off | `on`: OptiX's temporal denoiser with a traced flow guide - steadier background, but smears gold highlights (measured worse on Yennefer); for matte or foggy scenes at few samples |
 | `-Drt.smooth=off` | on | flat facets instead of smooth shading (films before 2026-11-15 were flat) |
 | `-Drt.firefly` | 16 (studio-model: 16 x its exposure) | the brightest a sample may be; `off` lets every sample through |
 | `-Drt.studio.turn` | 0 | studio-model: the figure's starting angle (degrees) |

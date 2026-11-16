@@ -21,4 +21,20 @@ interface ImageDenoiser : AutoCloseable {
     val upscale: Int get() = 1
 
     fun denoise(width: Int, height: Int, color: FloatArray, albedo: FloatArray, normal: FloatArray): FloatArray
+
+    /**
+     * Whether it carries what it learnt from one frame of a film into the next ([denoiseNext]),
+     * which keeps a few samples' noise from flickering: OptiX's temporal models.
+     */
+    val temporal: Boolean get() = false
+
+    /**
+     * The next frame of a film: [flow] is how far each pixel's first hit moved since the frame
+     * before (3 floats a pixel, the third unused, as the guides pass leaves it), [continuing]
+     * whether that frame was the last one denoised here. A denoiser without [temporal] memory
+     * denoises the frame alone.
+     */
+    fun denoiseNext(
+        width: Int, height: Int, color: FloatArray, albedo: FloatArray, normal: FloatArray, flow: FloatArray, continuing: Boolean
+    ): FloatArray = denoise(width, height, color, albedo, normal)
 }

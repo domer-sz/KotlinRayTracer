@@ -69,10 +69,10 @@ internal class OptixLayout private constructor(private val values: Map<String, L
             "OptixStackSizes" to listOf("cssRG", "cssMS", "cssCH", "cssAH", "cssIS", "cssCC", "dssDC"),
             "OptixFunctionTable" to emptyList(),
             "OptixDenoiserOptions" to listOf("guideAlbedo", "guideNormal", "denoiseAlpha"),
-            "OptixDenoiserSizes" to listOf("stateSizeInBytes", "withoutOverlapScratchSizeInBytes"),
+            "OptixDenoiserSizes" to listOf("stateSizeInBytes", "withoutOverlapScratchSizeInBytes", "internalGuideLayerPixelSizeInBytes"),
             "OptixDenoiserParams" to listOf("hdrIntensity", "blendFactor", "hdrAverageColor", "temporalModeUsePreviousLayers"),
-            "OptixDenoiserGuideLayer" to listOf("albedo", "normal").flatMap { image -> IMAGE_FIELDS.map { "$image.$it" } },
-            "OptixDenoiserLayer" to listOf("input", "output").flatMap { image -> IMAGE_FIELDS.map { "$image.$it" } } + "type"
+            "OptixDenoiserGuideLayer" to listOf("albedo", "normal", "flow", "previousOutputInternalGuideLayer", "outputInternalGuideLayer").flatMap { image -> IMAGE_FIELDS.map { "$image.$it" } },
+            "OptixDenoiserLayer" to listOf("input", "previousOutput", "output").flatMap { image -> IMAGE_FIELDS.map { "$image.$it" } } + "type"
         )
 
         /** The fields of an OptixImage2D, which the denoiser's structures hold several of. */
@@ -93,7 +93,9 @@ internal class OptixLayout private constructor(private val values: Map<String, L
             "OPTIX_PROGRAM_GROUP_KIND_RAYGEN", "OPTIX_PROGRAM_GROUP_KIND_MISS", "OPTIX_PROGRAM_GROUP_KIND_HITGROUP",
             "OPTIX_INSTANCE_FLAG_NONE",
             "OPTIX_DEVICE_PROPERTY_RTCORE_VERSION",
-            "OPTIX_DENOISER_MODEL_KIND_AOV", "OPTIX_DENOISER_MODEL_KIND_UPSCALE2X", "OPTIX_PIXEL_FORMAT_FLOAT3",
+            "OPTIX_DENOISER_MODEL_KIND_AOV", "OPTIX_DENOISER_MODEL_KIND_UPSCALE2X",
+            "OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV", "OPTIX_DENOISER_MODEL_KIND_TEMPORAL_UPSCALE2X",
+            "OPTIX_PIXEL_FORMAT_FLOAT3", "OPTIX_PIXEL_FORMAT_FLOAT2", "OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER",
             "OPTIX_DENOISER_ALPHA_MODE_COPY", "OPTIX_DENOISER_AOV_TYPE_BEAUTY"
         )
 
