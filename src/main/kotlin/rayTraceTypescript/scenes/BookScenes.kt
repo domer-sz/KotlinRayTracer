@@ -598,6 +598,9 @@ object BookScenes {
      * box has a half diagonal of 1 / 0.6162 (height 1.6226), which is what the lamps and the
      * camera there are laid out around. Meant for z-up STL files: -Drt.model=<path>.
      * -Drt.studio.turn=<degrees> spins the figure about the vertical axis; -Drt.studio.height=<h> sizes it otherwise.
+     * -Drt.studio.fog=<density> fills the studio with grey fog, lit by the same lamps (0.05 is a
+     * haze); -Drt.studio.fog.radius=<r> keeps it to a ball of that radius round the figure instead,
+     * whose edge shows. It is part of the room, so a turntable turns the figure inside it.
      */
     fun studioModel(): SceneDefinition {
         val path = System.getProperty("rt.model") ?: System.getenv("MODEL_FILE") ?: "model.stl"
@@ -638,6 +641,14 @@ object BookScenes {
         val sky = Color(0.000805f, 0.002263f, 0.010398f) * exposure
 
         val world = HittableList(mutableListOf(floor, wall, key, fill, rim, figure))
+        System.getProperty("rt.studio.fog")?.toFloatOrNull()?.takeIf { it > 0f }?.let { density ->
+            // A ball round the figure: by default one taking in the room, camera and lamps too, so it
+            // has no edge in sight. Grey: it scatters every colour alike.
+            val radius = System.getProperty("rt.studio.fog.radius")?.toFloatOrNull()?.takeIf { it > 0f } ?: STUDIO_ROOM_RADIUS
+            val ball = Sphere(Point(0f, height * 0.5f, 0f), radius, Dielectric(1.5f))
+            world.add(ConstantMedium(ball, density, Color(0.6f, 0.6f, 0.6f)))
+            println("Grey fog round the figure, density $density, radius $radius")
+        }
         return SceneDefinition(
             name = "studio-model",
             world = world,
@@ -662,6 +673,9 @@ object BookScenes {
             parts = listOf(ScenePart("Figura", figure))
         )
     }
+
+    /** A fog ball this big takes in the studio: the floor's half width is 48.7, the wall 50 away. */
+    private const val STUDIO_ROOM_RADIUS = 60f
 
     /** Height of the studio figure, which fixes the scale everything else is laid out in. */
     private const val STUDIO_HEIGHT = 1.6226f
