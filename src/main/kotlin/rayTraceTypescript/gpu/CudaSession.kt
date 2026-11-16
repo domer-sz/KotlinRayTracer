@@ -88,8 +88,9 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         MemoryStack.stackPush().use { stack ->
             // cuLaunchKernel takes a pointer to each argument's value, in the kernel's order:
             // the camera and the scene buffers, then the output and the launch's numbers.
-            // The normal guide follows the output; only the guides pass (GUIDES) writes it.
-            val pointers = sceneArguments + outputs[target] + outputs[GpuSession.NORMAL]
+            // The normal and flow guides follow the output; only the guides pass (GUIDES) writes them,
+            // and the flow stays zeros here: this kernel does not know which hits turn.
+            val pointers = sceneArguments + outputs[target] + outputs[GpuSession.NORMAL] + outputs[GpuSession.FLOW]
             val params = stack.mallocPointer(pointers.size + 10)
             pointers.forEachIndexed { i, buffer -> params.put(i, MemoryUtil.memAddress(stack.longs(buffer))) }
             var at = pointers.size

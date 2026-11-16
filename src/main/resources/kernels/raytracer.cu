@@ -232,6 +232,9 @@ typedef struct {
     float v;
     int material;
     bool frontFace;
+#if RT_OPTIX && GUIDES_ON
+    int turning;                         // the guides only: a placed mesh a turntable turns, which the flow follows
+#endif
 } HitRecord;
 
 // ---------------------------------------------------------------- scene traversal
@@ -279,7 +282,7 @@ struct Instance {
     int paletteCount;
     float cosTurn;
     float sinTurn;
-    int spare;
+    int turning;                         // 1 while a turntable turns it: the flow guide follows it
 };
 
 // What an OptiX launch is given: the scene's buffers, which the CUDA kernel takes as arguments,
@@ -309,6 +312,7 @@ struct Params {
     const float* triangleNormals;        // the loose triangles' corner normals, as the CUDA kernel's argument
     float* out;
     float* guideNormal;                  // with GUIDES, the normal guide the albedo guide's rays find
+    float* guideFlow;                    // with GUIDES, how far each pixel's first hit moved since the frame before, in pixels
     const int* quadIds;                  // the quad each pair of triangles in the tree stands for
     const int* sphereIds;                // the sphere each primitive of the spheres' tree stands for
     const Instance* instances;
@@ -326,6 +330,10 @@ struct Params {
     int quadInput;                       // which input of the tree of loose surfaces holds the quads; -1 without any
     float fireflyClamp;                  // the brightest a sample may be; 0 for no limit
     int mediumCount;                     // the volumes, which world_hit tests after OptiX's search
+    float turnCos;                       // the turn that takes a turning mesh back to where it stood a frame
+    float turnSin;                       // before, as an Instance turns (x' = c x + s z, z' = -s x + c z),
+    float turnAxisX;                     // about the vertical line through (turnAxisX, turnAxisZ)
+    float turnAxisZ;
 };
 
 extern "C" {
@@ -567,9 +575,21 @@ __device__ inline float3 smooth_normal(const float* n, float u, float v, float3 
     return (ls > 1e-6f && dot(s, outward) > 0.0f) ? s / ls : outward;
 }
 
+// Where [p] lands on the screen of a pinhole camera at [center] whose pixel (0, 0) is centred at
+// [pixel00] and whose pixels step by [du] and [dv]: (column, row), in pixels, fractions kept.
+__device__ inline float2 screen_position(float3 p, float3 center, float3 pixel00, float3 du, float3 dv) {
+    float3 n = cross(du, dv);
+    float3 d = p - center;
+    float3 q = center + d * (dot(pixel00 - center, n) / dot(d, n)) - pixel00;
+    return make_float2(dot(q, du) / dot(du, du), dot(q, dv) / dot(dv, dv));
+}
+
 // Everything shading needs about the winning hit, computed once.
 __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 origin, float3 direction,
                        float time, HitRecord* rec) {
+#if RT_OPTIX && GUIDES_ON
+    rec->turning = 0;
+#endif
     rec->t = best->t;
     rec->point = origin + best->t * direction;
     rec->u = best->u;
@@ -611,6 +631,9 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
                                     -placed->sinTurn * facet.x + placed->cosTurn * facet.z);
         shading = make_float3(placed->cosTurn * n.x + placed->sinTurn * n.z, n.y, -placed->sinTurn * n.x + placed->cosTurn * n.z);
         rec->material = placed->material;
+#if GUIDES_ON
+        rec->turning = placed->turning;
+#endif
         if (placed->faces) {
             int entry = placed->faces[best->index];
             if (entry >= 0 && entry < placed->paletteCount) rec->material = params.palette[placed->palette + entry];
@@ -1152,6 +1175,7 @@ extern "C" __global__ void __raygen__render() {
     const float fireflyClamp = params.fireflyClamp;
     float* out = params.out;
     float* guideNormal = params.guideNormal;
+    float* guideFlow = params.guideFlow;
     const int width = params.width;
     const int height = params.height;
     const int sampleStart = params.sampleStart;
@@ -1191,6 +1215,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                      const float* __restrict__ triangleNormals,
                      float* out,
                      float* guideNormal,
+                     float* guideFlow,
                      const int width,
                      const int height,
                      const int sampleStart,
@@ -1238,6 +1263,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
 
     float3 pixelColor = make_float3(0.0f, 0.0f, 0.0f);
     float3 normalSum = make_float3(0.0f, 0.0f, 0.0f);
+    float flowX = 0.0f, flowY = 0.0f;
 
     // One bounce per iteration rather than a loop over samples around a loop over bounces: a
     // thread whose path has ended starts its next sample straight away, so the threads of a
@@ -1318,6 +1344,21 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                 guide = AOV_MODE == 2 ? first.normal
                     : aov_albedo(matI, texI, texF, images, perlinVectors, perlinPermutations, &first);
                 if (GUIDES_ON) normalSum += first.normal;
+#if RT_OPTIX && GUIDES_ON
+                if (first.turning) {
+                    // Where this point of a turning mesh stood a frame ago, and how far that
+                    // moved it across the screen; the camera stands still.
+                    float3 p = first.point;
+                    float dx = p.x - params.turnAxisX;
+                    float dz = p.z - params.turnAxisZ;
+                    float3 before = make_float3(params.turnAxisX + params.turnCos * dx + params.turnSin * dz, p.y,
+                                                params.turnAxisZ - params.turnSin * dx + params.turnCos * dz);
+                    float2 now = screen_position(p, cameraCenter, pixel00, pixelDeltaU, pixelDeltaV);
+                    float2 then = screen_position(before, cameraCenter, pixel00, pixelDeltaU, pixelDeltaV);
+                    flowX += now.x - then.x;
+                    flowY += now.y - then.y;
+                }
+#endif
             }
             pixelColor += guide;
             sample++;
@@ -1414,5 +1455,10 @@ extern "C" __global__ void render(const float* __restrict__ cam,
         normalSum *= pixelSamplesScale;
         if (sampleStart > 0) normalSum += make_float3(guideNormal[base], guideNormal[base + 1], guideNormal[base + 2]);
         guideNormal[base] = normalSum.x; guideNormal[base + 1] = normalSum.y; guideNormal[base + 2] = normalSum.z;
+        // The flow, averaged like the rest: (x, y) in pixels of this image, the third float unused.
+        flowX *= pixelSamplesScale;
+        flowY *= pixelSamplesScale;
+        if (sampleStart > 0) { flowX += guideFlow[base]; flowY += guideFlow[base + 1]; }
+        guideFlow[base] = flowX; guideFlow[base + 1] = flowY; guideFlow[base + 2] = 0.0f;
     }
 }

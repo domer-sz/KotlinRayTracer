@@ -34,7 +34,9 @@ class MeshInstance internal constructor(
     /** The material of the whole mesh, and of a face whose own is missing from [palette]. */
     val material: Int,
     /** The material of each entry of the mesh's own palette, when the file's colours are used. */
-    val palette: IntArray?
+    val palette: IntArray?,
+    /** Whether a turntable is turning it: the flow guide follows it ([PlacedMesh.turning]). */
+    val turning: Boolean = false
 )
 
 /**
@@ -164,7 +166,8 @@ class InstancedScene internal constructor(
                     instances += MeshInstance(
                         block, hittable.scale, hittable.cos, hittable.sin, hittable.offset,
                         materials.register(hittable.material),
-                        hittable.palette?.takeIf { block.mesh.hasColours }?.map { materials.register(it) }?.toIntArray()
+                        hittable.palette?.takeIf { block.mesh.hasColours }?.map { materials.register(it) }?.toIntArray(),
+                        hittable.turning
                     )
                 }
                 is ConstantMedium -> volumes += hittable to transform

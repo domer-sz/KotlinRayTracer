@@ -21,6 +21,13 @@ internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, 
         }
 
     override val devices: List<String> get() = current.devices
+    override val tracesFlow: Boolean get() = current.tracesFlow
+    private var turn: FrameTurn? = null
+
+    override fun setTurn(turn: FrameTurn?) {
+        this.turn = turn
+        current.setTurn(turn)
+    }
 
     override fun replaceScene(next: GpuScene) {
         val wantsOptix = OptixSession.unsupported(next.instanced) == null
@@ -33,6 +40,7 @@ internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, 
         current = openFor(next)
         current.seed = seed
         camera?.let { current.setCamera(it) }
+        current.setTurn(turn)
     }
 
     override fun setCamera(setup: CameraSetup) {

@@ -116,7 +116,12 @@ class PlacedMesh(
     val offset: Vector,
     val material: Material,
     /** The file's own materials, one per palette entry, when its colours are used; else [material] throughout. */
-    val palette: List<Material>? = null
+    val palette: List<Material>? = null,
+    /**
+     * Set while a turntable film turns it frame by frame: the denoiser's flow guide then follows
+     * its surface (see [rayTraceTypescript.gpu.FrameTurn]). Nothing else reads it.
+     */
+    val turning: Boolean = false
 ) : Hittable {
     val cos: Float = kotlin.math.cos(Math.toRadians(degrees.toDouble())).toFloat()
     val sin: Float = kotlin.math.sin(Math.toRadians(degrees.toDouble())).toFloat()

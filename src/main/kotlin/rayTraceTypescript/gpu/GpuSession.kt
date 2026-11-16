@@ -58,6 +58,16 @@ interface GpuSession : AutoCloseable {
     /** The cards tracing and their engines, for a status line: "RTX 2060 (OptiX)". */
     val devices: List<String>
 
+    /**
+     * Whether the guides pass fills [FLOW] with how far each pixel's first hit moved since the
+     * frame before, given [setTurn]. Only OptiX knows which hits belong to a turning placed mesh;
+     * elsewhere the flow is all zeros and a temporal denoiser must not be fed it.
+     */
+    val tracesFlow: Boolean get() = false
+
+    /** The turn of the film frame being traced, for the flow guide; null when nothing turns. */
+    fun setTurn(turn: FrameTurn?) {}
+
     override fun close()
 
     /**
@@ -96,7 +106,8 @@ interface GpuSession : AutoCloseable {
         const val MODE_SHADED = 3
         /**
          * Both of the denoiser's guides from one pass over the first hit: the albedo into the
-         * launch's target, the normal into [NORMAL]. Half the rays of the two separate passes.
+         * launch's target, the normal into [NORMAL] and the flow into [FLOW]. Half the rays of the
+         * two separate passes.
          * (Gathering them in the image's own pass instead was tried, and on the RTX 2060 through
          * OptiX it slowed the image by more than both passes take.)
          */
@@ -109,17 +120,18 @@ interface GpuSession : AutoCloseable {
 
         /**
          * Output targets: the image, the scratch buffer guides go to, and the two outputs
-         * [MODE_GUIDES] fills - the albedo, when it is the launch's target, and the normal.
+         * [MODE_GUIDES] fills - the albedo, when it is the launch's target, the normal and the flow.
          */
         const val IMAGE = 0
         const val GUIDE = 1
         const val ALBEDO = 2
         const val NORMAL = 3
-        internal const val TARGETS = 4
+        const val FLOW = 4
+        internal const val TARGETS = 5
 
         /** The outputs a launch in [mode] into [target] writes. */
         internal fun targetsOf(mode: Int, target: Int): List<Int> =
-            if (gathersGuides(mode)) listOf(target, NORMAL) else listOf(target)
+            if (gathersGuides(mode)) listOf(target, NORMAL, FLOW) else listOf(target)
 
         /** Length [traceSliced] aims each launch at. */
         const val SLICE_MS = 200.0
@@ -169,3 +181,10 @@ interface GpuSession : AutoCloseable {
         )
     }
 }
+
+/**
+ * How a turntable film turns its placed meshes from one frame to the next: [degrees] about the
+ * vertical line through ([axisX], [axisZ]), as [Placement.turned] turns them. The flow guide
+ * takes each hit on a turning mesh back by that much to see where it was a frame ago.
+ */
+data class FrameTurn(val axisX: Float, val axisZ: Float, val degrees: Float)

@@ -7,6 +7,7 @@ import org.lwjgl.cuda.CU.cuMemsetD32
 import org.lwjgl.system.MemoryUtil
 import rayTraceTypescript.gpu.CudaContext
 import rayTraceTypescript.gpu.DeviceMemory
+import rayTraceTypescript.gpu.FrameTurn
 import rayTraceTypescript.gpu.Engine
 import rayTraceTypescript.gpu.GpuDevice
 import rayTraceTypescript.gpu.GpuKeepAwake
@@ -42,6 +43,13 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
     private val cuda = CudaContext.create(device)
     override val devices: List<String> = listOf(GpuPick(device, Engine.OPTIX).toString())
     override var seed: Long = GpuSession.initialSeed()
+
+    /** The film frame's turn, for the flow guide. */
+    private var turn: FrameTurn? = null
+    override val tracesFlow: Boolean get() = true
+    override fun setTurn(turn: FrameTurn?) {
+        this.turn = turn
+    }
 
     /** Device memory kept for the session's life, and the scene's, freed when it is replaced. */
     private val sessionMemory = mutableListOf<Long>()
@@ -125,12 +133,16 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // The kernel's Params: pointers and 64-bit numbers first, then the 32-bit ones.
         paramsHost.clear()
         sceneArguments.forEach { paramsHost.putLong(it) }
-        paramsHost.putLong(outputs[target]).putLong(outputs[GpuSession.NORMAL]).putLong(quadIds).putLong(sphereIds).putLong(instanceTable).putLong(palette)
+        paramsHost.putLong(outputs[target]).putLong(outputs[GpuSession.NORMAL]).putLong(outputs[GpuSession.FLOW]).putLong(quadIds).putLong(sphereIds).putLong(instanceTable).putLong(palette)
             .putLong(top!!.handle).putLong(seed)
         // The root node is the CUDA kernel's: OptiX searches its own trees.
         paramsHost.putInt(setup.imageWidth).putInt(setup.imageHeight).putInt(sampleStart).putInt(count)
             .putInt(setup.maxReflectionDepth).putFloat(scale).putInt(0).putInt(scene.lightCount).putInt(quadInput)
             .putFloat(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f).putInt(scene.mediumCount)
+        // The turn that takes a turning mesh back a frame: the frame's turn, undone.
+        val back = Math.toRadians(-(turn?.degrees ?: 0f).toDouble())
+        paramsHost.putFloat(kotlin.math.cos(back).toFloat()).putFloat(kotlin.math.sin(back).toFloat())
+            .putFloat(turn?.axisX ?: 0f).putFloat(turn?.axisZ ?: 0f)
         check(paramsHost.position() == PARAMS_BYTES - PARAMS_PADDING) { "Params is ${paramsHost.position()} bytes, the kernel expects ${PARAMS_BYTES - PARAMS_PADDING}" }
         DeviceMemory.write(paramsBuffer, paramsHost)
 
@@ -268,7 +280,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
                 val own = instance.palette ?: IntArray(0)
                 table.putLong(onCard.vertices).putLong(if (own.isEmpty()) 0L else onCard.faces).putLong(onCard.normals)
                     .putInt(instance.material).putInt(paletteEntries.size).putInt(own.size)
-                    .putFloat(instance.cos).putFloat(instance.sin).putInt(0)
+                    .putFloat(instance.cos).putFloat(instance.sin).putInt(if (instance.turning) 1 else 0)
                 own.forEach { paletteEntries += it }
             }
             instanceTable = keep(DeviceMemory.upload(table))
@@ -513,9 +525,9 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             else -> null
         }
 
-        /** The kernel's Params: 29 pointers and 64-bit numbers, then 11 numbers of 32 bits, padded to a multiple of 8 as the compiler pads it. */
+        /** The kernel's Params: 30 pointers and 64-bit numbers, then 15 numbers of 32 bits, padded to a multiple of 8 as the compiler pads it. */
         private const val PARAMS_PADDING = 4
-        private const val PARAMS_BYTES = 29 * 8 + 11 * 4 + PARAMS_PADDING
+        private const val PARAMS_BYTES = 30 * 8 + 15 * 4 + PARAMS_PADDING
         /** The kernel's Instance: three pointers, then six numbers of 32 bits. */
         private const val INSTANCE_BYTES = 3 * 8 + 6 * 4
         /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance (and with moving spheres, the ray's time, which it is handed). */

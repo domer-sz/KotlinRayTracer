@@ -17,7 +17,7 @@ object Placement {
      * triangle, which for a model of hundreds of thousands of triangles is the difference between
      * a fraction of a second and seconds. Anything else gets instance wrappers.
      */
-    fun moved(h: Hittable, from: Vector, degrees: Float, to: Vector): Hittable {
+    fun moved(h: Hittable, from: Vector, degrees: Float, to: Vector, turning: Boolean = false): Hittable {
         if (h is PlacedMesh) {
             val radians = Math.toRadians(degrees.toDouble())
             val c = kotlin.math.cos(radians).toFloat()
@@ -26,15 +26,18 @@ object Placement {
             val dy = h.offset.y - from.y
             val dz = h.offset.z - from.z
             val offset = Vector(c * dx + s * dz + to.x, dy + to.y, -s * dx + c * dz + to.z)
-            return PlacedMesh(h.block, h.scale, h.degrees + degrees, offset, h.material, h.palette)
+            return PlacedMesh(h.block, h.scale, h.degrees + degrees, offset, h.material, h.palette, turning)
         }
         val centred = Translate(h, Vector(-from.x, -from.y, -from.z))
         return Translate(RotateY(centred, degrees), to)
     }
 
-    /** [h] turned [degrees] in place about the vertical line through ([x], [z]). */
-    fun turned(h: Hittable, x: Float, z: Float, degrees: Float): Hittable {
+    /**
+     * [h] turned [degrees] in place about the vertical line through ([x], [z]); [turning] marks a
+     * placed mesh as one a turntable keeps turning, for the denoiser's flow guide.
+     */
+    fun turned(h: Hittable, x: Float, z: Float, degrees: Float, turning: Boolean = false): Hittable {
         val axis = Vector(x, 0f, z)
-        return moved(h, axis, degrees, axis)
+        return moved(h, axis, degrees, axis, turning)
     }
 }
