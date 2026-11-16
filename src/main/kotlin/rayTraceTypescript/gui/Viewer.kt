@@ -157,6 +157,8 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     // into a picture needs no GPU either. One thread each, so their results come in order.
     private val denoiseExecutor = Executors.newSingleThreadExecutor { Thread(it, "viewer-denoise").apply { isDaemon = true } }
     private val displayExecutor = Executors.newSingleThreadExecutor { Thread(it, "viewer-display").apply { isDaemon = true } }
+    /** Denoises the frames in motion, one after another, while the GPU traces the next. */
+    private val motionExecutor = Executors.newSingleThreadExecutor { Thread(it, "viewer-motion").apply { isDaemon = true } }
 
     /** Models added in this window; editing one bumps [sceneVersion] so the GPU copy is rebuilt. */
     val objects = CopyOnWriteArrayList<PlacedObject>()
@@ -724,11 +726,14 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                     System.err.println("[viewer] scene rebuilt: flatten ${(flattened - start) / 1_000_000} ms, upload ${(System.nanoTime() - flattened) / 1_000_000} ms")
                     next
                 }
-                try {
-                    loop(denoiser, open)
-                } finally {
-                    // Before the denoiser's library is freed, whatever it is still running ends.
-                    stopBackground()
+                // In motion: the film's look - half size, 16 samples, enlarged by a temporal denoiser.
+                GpuRenderer.motionDenoiser().use { motion ->
+                    try {
+                        loop(denoiser, motion, open)
+                    } finally {
+                        // Before the denoiser's library is freed, whatever it is still running ends.
+                        stopBackground()
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -740,7 +745,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         }
     }
 
-    private fun loop(denoiser: ImageDenoiser?, open: (Int) -> GpuSession) {
+    private fun loop(denoiser: ImageDenoiser?, motion: ImageDenoiser?, open: (Int) -> GpuSession) {
         var session: GpuSession? = null
         var builtVersion = -1
         var builtGpus = -1
@@ -775,6 +780,16 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         val displayBusy = AtomicBoolean(false)
         var displayIntervalNs = DISPLAY_INTERVAL_NS
         var lastShownState: List<Any?>? = null
+        // The camera in motion: where it stood for the frame before, whether the temporal denoiser
+        // carries on from that frame, and where its time goes.
+        var motionPrevious: CameraSetup? = null
+        var motionContinuing = false
+        // The frame in motion being denoised beside the tracing of the next; one at most.
+        var pendingMotion: Future<*>? = null
+        val motionTiming = MotionTiming()
+        // -Drt.gui.spin=<degrees a second> keeps the camera orbiting, as if dragged: for timing motion.
+        val spin = System.getProperty("rt.gui.spin")?.toDoubleOrNull()?.let { Math.toRadians(it) }
+        var spunAt = System.nanoTime()
 
         while (running) {
             // A film takes the GPU over until it is done; the view then starts afresh.
@@ -800,8 +815,16 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                 builtVersion = version
                 builtGpus = gpus
                 accumulated = null
+                // A new scene: nothing of the frame before carries over.
+                motionContinuing = false
             }
 
+            if (spin != null) {
+                val now = System.nanoTime()
+                view = view.with(yaw = view.yaw + spin * (now - spunAt) / 1e9)
+                spunAt = now
+                lastInput = System.currentTimeMillis()
+            }
             val current = view
             if (!raytrace) {
                 // The quick look: full size from the first frame, a few jittered rays per pixel
@@ -839,6 +862,45 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             }
 
             val moving = dragging || System.currentTimeMillis() - lastInput < SETTLE_MS
+            val full = setup(current, size)
+            if (moving && motion != null && full.imageWidth % 2 == 0 && full.imageHeight % 2 == 0) {
+                // As a turntable film is made: half size, 16 samples, guides with the flow the camera's
+                // move makes, and the temporal denoiser enlarging it, carried on from the frame before.
+                val half = full.halved()
+                val frameStart = System.nanoTime()
+                session.seed = session.seed + 1
+                session.setTurn(null)
+                session.setCamera(half, motionPrevious ?: half)
+                session.launch(GpuSession.MODE_IMAGE, half, 0, MOTION_SAMPLES, 1.0f / MOTION_SAMPLES)
+                val image = FloatArray(half.totalPixels * 3).also { session.read(GpuSession.IMAGE, it) }
+                val traced = System.nanoTime()
+                val (albedo, normal) = GpuRenderer.renderGuides(session, half, MOTION_SAMPLES)
+                val flow = FloatArray(half.totalPixels * 3).also { session.read(GpuSession.FLOW, it) }
+                val guided = System.nanoTime()
+                // The frame before must be denoised first: the temporal denoiser carries it into this one.
+                pendingMotion?.get()
+                val continuing = motionContinuing
+                pendingMotion = motionExecutor.submit {
+                    val denoiseStart = System.nanoTime()
+                    val clean = motion.denoiseNext(half.imageWidth, half.imageHeight, image, albedo, normal, flow, continuing)
+                    val denoisedAt = System.nanoTime()
+                    show(
+                        toImage(clean, full.imageWidth, full.imageHeight, 1.0f),
+                        "w ruchu ${half.imageWidth}×${half.imageHeight} → ${full.imageWidth}×${full.imageHeight}, $MOTION_SAMPLES spp, odszumianie czasowe"
+                    )
+                    motionTiming.frame(traced - frameStart, guided - traced, denoisedAt - denoiseStart, System.nanoTime() - denoisedAt)
+                }
+                motionPrevious = half
+                motionContinuing = true
+                accumulated = null
+                continue
+            }
+            // The last frame in motion goes up before anything still does.
+            pendingMotion?.get()
+            pendingMotion = null
+            // Still, or no temporal denoiser: the next move starts its history afresh.
+            motionPrevious = null
+            motionContinuing = false
             if (moving) {
                 // Quarter size, one fresh sample: rough, but it follows the mouse.
                 val preview = Resolution(maxOf(size.width / PREVIEW_DIVISOR, 32), maxOf(size.height / PREVIEW_DIVISOR, 32))
@@ -1007,6 +1069,8 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
 
     /** Lets the denoise and display threads finish: the denoiser's library must not be freed under them. */
     private fun stopBackground() {
+        motionExecutor.shutdown()
+        motionExecutor.awaitTermination(10, TimeUnit.SECONDS)
         denoiseExecutor.shutdown()
         denoiseExecutor.awaitTermination(60, TimeUnit.SECONDS)
         displayExecutor.shutdown()
@@ -1450,6 +1514,8 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
 
     companion object {
         private const val PREVIEW_DIVISOR = 4
+        /** Samples a frame in motion, as a turntable film at its quickest setting. */
+        private const val MOTION_SAMPLES = 16
         private const val PREVIEW_SAMPLES = 1
         /** How long after the last mouse or key move the full-size render takes over. */
         private const val SETTLE_MS = 150L
@@ -1475,5 +1541,41 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         private const val UPWARD = 0.7
         private const val HELP =
             "LPM obrót · Shift+LPM przesuń · kółko zoom · Ctrl+LPM postaw · T tryb · S zapis · F1 skróty"
+    }
+}
+
+/**
+ * How the viewer keeps up while the camera moves: every couple of seconds, frames a second and
+ * where a frame's time went - tracing, the guides with the flow, the temporal denoiser, handing
+ * the picture over.
+ */
+private class MotionTiming {
+    private var frames = 0
+    private var trace = 0L
+    private var guides = 0L
+    private var denoise = 0L
+    private var show = 0L
+    private var since = System.nanoTime()
+
+    fun frame(traceNs: Long, guidesNs: Long, denoiseNs: Long, showNs: Long) {
+        frames++
+        trace += traceNs
+        guides += guidesNs
+        denoise += denoiseNs
+        show += showNs
+        val now = System.nanoTime()
+        if (now - since < 2_000_000_000L) return
+        fun ms(total: Long) = total / frames / 1_000_000
+        System.err.println(
+            "[viewer] in motion: %.1f frames a second (trace %d ms, guides %d ms, denoising %d ms, picture %d ms)".format(
+                frames / ((now - since) / 1e9), ms(trace), ms(guides), ms(denoise), ms(show)
+            )
+        )
+        frames = 0
+        trace = 0L
+        guides = 0L
+        denoise = 0L
+        show = 0L
+        since = now
     }
 }

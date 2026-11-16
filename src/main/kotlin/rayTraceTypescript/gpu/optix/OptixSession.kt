@@ -120,10 +120,12 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         }
     }
 
-    override fun setCamera(setup: CameraSetup) {
+    override fun setCamera(setup: CameraSetup) = setCamera(setup, null)
+
+    override fun setCamera(setup: CameraSetup, previous: CameraSetup?) {
         cuda.makeCurrent()
         staging.clear()
-        staging.put(GpuSession.cameraParameters(setup)).flip()
+        staging.put(GpuSession.cameraParameters(setup, previous)).flip()
         CudaContext.check(cuMemcpyHtoD(cameraBuffer, staging), "cuMemcpyHtoD(camera)")
     }
 

@@ -72,8 +72,9 @@ class FlowGuideTest {
                 largest = maxOf(largest, abs(ex), abs(ey))
                 meshPixels++
             } else if (onFloor) {
-                assertEquals(0.0f, gx, 1e-6f, "the floor at ($x, $y) does not move")
-                assertEquals(0.0f, gy, 1e-6f, "the floor at ($x, $y) does not move")
+                // Not exactly zero: the two projections of the same point round apart by a millionth.
+                assertEquals(0.0f, gx, 1e-4f, "the floor at ($x, $y) does not move")
+                assertEquals(0.0f, gy, 1e-4f, "the floor at ($x, $y) does not move")
                 floorPixels++
             }
         }
@@ -84,6 +85,57 @@ class FlowGuideTest {
         assertTrue(floorPixels > 200, "only $floorPixels pixels inside the floor")
         // A turn this large must move the mesh by whole pixels, or the test proves little.
         assertTrue(largest > 1.0f, "the mesh moved at most $largest pixels")
+    }
+
+    @Test
+    fun `cuda flow follows a moving camera`() = cameraFlow("0:cuda")
+
+    @Test
+    fun `optix flow follows a moving camera`() {
+        // The card first: OptiX's library is found beside the CUDA one, once that is loaded.
+        assumeTrue(GpuRenderer.unavailabilityReason() == null, "No CUDA device available")
+        assumeTrue(OptixApi.unavailabilityReason() == null, "OptiX is not available")
+        cameraFlow("0:optix")
+    }
+
+    /**
+     * A still scene and a camera that orbited a little since the frame before, as the viewer's
+     * does while dragged: each hit moves across the screen by where the camera sees it now less
+     * where it saw it then.
+     */
+    private fun cameraFlow(gpus: String) {
+        val gpu = GpuRenderer.unavailabilityReason()
+        assumeTrue(gpu == null, "No CUDA device available: $gpu")
+        val setup = camera().initialize()
+        val previous = camera().apply { lookFrom = Point(4.3f, 2.4f, 4.7f) }.initialize()
+        val figure = PlacedMesh(MeshBlock(octahedron()), 1.4f, 20.0f, Vector(0.2f, 0.0f, -0.1f), Lambertian(Color(0.7f, 0.5f, 0.3f)))
+        val world = HittableList(mutableListOf(floor(), figure))
+
+        val flow = GpuSession.open(SceneFlattener.scene(world), setup.totalPixels, GpuChoice(gpus = gpus)).use { session ->
+            session.setCamera(setup, previous)
+            GpuRenderer.renderGuides(session, setup, 64)
+            FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.FLOW, it) }
+        }
+
+        var counted = 0
+        var errorSum = 0.0f
+        var largest = 0.0f
+        for (y in 2 until setup.imageHeight - 2) for (x in 2 until setup.imageWidth - 2) {
+            val hits = (-1..1).flatMap { dy -> (-1..1).map { dx -> firstHit(world, setup, x + dx, y + dy) } }
+            if (hits.any { it == null } || hits.map { it!!.material }.toSet().size != 1) continue
+            val p = hits[4]!!.point
+            val (nx, ny) = screen(p, setup)
+            val (px, py) = screen(p, previous)
+            val ex = nx - px
+            val ey = ny - py
+            errorSum += maxOf(abs(ex - flow[(y * setup.imageWidth + x) * 3]), abs(ey - flow[(y * setup.imageWidth + x) * 3 + 1]))
+            largest = maxOf(largest, abs(ex), abs(ey))
+            counted++
+        }
+        println("camera flow ($gpus): $counted pixels, mean error ${errorSum / counted} px, largest flow $largest px")
+        assertTrue(counted > 1000, "only $counted pixels inside one surface")
+        assertTrue(largest > 2.0f, "the camera moved the image by at most $largest pixels")
+        assertTrue(errorSum / counted < 0.03f, "the flow is off by ${errorSum / counted} pixels on average")
     }
 
     private fun firstHit(world: HittableList, setup: CameraSetup, x: Int, y: Int) =

@@ -74,9 +74,11 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         }
     }
 
-    override fun setCamera(setup: CameraSetup) {
+    override fun setCamera(setup: CameraSetup) = setCamera(setup, null)
+
+    override fun setCamera(setup: CameraSetup, previous: CameraSetup?) {
         cuda.makeCurrent()
-        val parameters = GpuSession.cameraParameters(setup)
+        val parameters = GpuSession.cameraParameters(setup, previous)
         staging.clear()
         staging.put(parameters).flip()
         CudaContext.check(cuMemcpyHtoD(cameraBuffer, staging), "cuMemcpyHtoD(camera)")

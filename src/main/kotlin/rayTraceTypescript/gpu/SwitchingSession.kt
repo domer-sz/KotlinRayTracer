@@ -13,6 +13,7 @@ import rayTraceTypescript.render.CameraSetup
 internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, private val maxPixels: Int) : GpuSession {
     private var current: GpuSession = openFor(scene)
     private var camera: CameraSetup? = null
+    private var previousCamera: CameraSetup? = null
 
     override var seed: Long
         get() = current.seed
@@ -39,13 +40,16 @@ internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, 
         current.close()
         current = openFor(next)
         current.seed = seed
-        camera?.let { current.setCamera(it) }
+        camera?.let { current.setCamera(it, previousCamera) }
         current.setTurn(turn)
     }
 
-    override fun setCamera(setup: CameraSetup) {
+    override fun setCamera(setup: CameraSetup) = setCamera(setup, null)
+
+    override fun setCamera(setup: CameraSetup, previous: CameraSetup?) {
         camera = setup
-        current.setCamera(setup)
+        previousCamera = previous
+        current.setCamera(setup, previous)
     }
 
     override fun launch(mode: Int, setup: CameraSetup, sampleStart: Int, count: Int, scale: Float, target: Int) =

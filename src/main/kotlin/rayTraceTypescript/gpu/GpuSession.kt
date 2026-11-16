@@ -34,6 +34,13 @@ interface GpuSession : AutoCloseable {
     fun setCamera(setup: CameraSetup)
 
     /**
+     * As [setCamera], and [previous] is where the camera stood for the frame before, which the flow
+     * guide measures each first hit's move against (null: it stood here). A session that keeps no
+     * flow takes only [setup].
+     */
+    fun setCamera(setup: CameraSetup, previous: CameraSetup?) = setCamera(setup)
+
+    /**
      * Traces samples [sampleStart] until [sampleStart] + [count] of every pixel of [setup]'s
      * image, in [mode], into [target], scaled by [scale]. A launch whose [sampleStart] is above
      * zero adds to what the target holds. Returns when the GPU is done.
@@ -135,7 +142,7 @@ interface GpuSession : AutoCloseable {
 
         /** Length [traceSliced] aims each launch at. */
         const val SLICE_MS = 200.0
-        internal const val CAMERA_FLOATS = 23
+        internal const val CAMERA_FLOATS = 35
 
         /**
          * A session for [scene], with outputs for up to [maxPixels] pixels, on the cards and with
@@ -164,8 +171,11 @@ interface GpuSession : AutoCloseable {
 
         internal fun initialSeed(): Long = RandomSource.seedValue() ?: Random.Default.nextLong()
 
-        /** The camera as the kernel reads it: 23 floats. */
-        internal fun cameraParameters(setup: CameraSetup): FloatArray = floatArrayOf(
+        /**
+         * The camera as the kernel reads it: 35 floats - the camera, then where it stood for the
+         * frame before ([previous], or the same), which only the flow guide reads.
+         */
+        internal fun cameraParameters(setup: CameraSetup, previous: CameraSetup? = null): FloatArray = floatArrayOf(
             setup.cameraCenter.x, setup.cameraCenter.y, setup.cameraCenter.z,
             setup.pixel00.x, setup.pixel00.y, setup.pixel00.z,
             setup.pixelDeltaU.x, setup.pixelDeltaU.y, setup.pixelDeltaU.z,
@@ -178,7 +188,14 @@ interface GpuSession : AutoCloseable {
             setup.background?.r ?: 0.0f,
             setup.background?.g ?: 0.0f,
             setup.background?.b ?: 0.0f
-        )
+        ) + (previous ?: setup).let { p ->
+            floatArrayOf(
+                p.cameraCenter.x, p.cameraCenter.y, p.cameraCenter.z,
+                p.pixel00.x, p.pixel00.y, p.pixel00.z,
+                p.pixelDeltaU.x, p.pixelDeltaU.y, p.pixelDeltaU.z,
+                p.pixelDeltaV.x, p.pixelDeltaV.y, p.pixelDeltaV.z
+            )
+        }
     }
 }
 

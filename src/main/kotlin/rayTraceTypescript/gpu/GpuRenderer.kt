@@ -160,6 +160,28 @@ class GpuRenderer : Renderer {
          */
         fun temporalWanted(): Boolean = System.getProperty("rt.temporal")?.trim()?.lowercase()?.let { it == "on" || it == "true" } ?: false
 
+        /**
+         * The viewer's denoiser for a camera in motion: OptiX's temporal model that also enlarges,
+         * on the card that traces best, as long as the enlarging works there (not a GTX 1070).
+         * Null - and the viewer keeps its rough quarter-size preview in motion - without denoising
+         * (-Drt.denoise=off), without OptiX, or with -Drt.gui.motion=plain.
+         */
+        fun motionDenoiser(): ImageDenoiser? {
+            if (System.getProperty("rt.denoise")?.let { it != "off" } != true) return null
+            if (System.getProperty("rt.gui.motion")?.lowercase() == "plain") return null
+            val devices = CudaContext.devices()
+            val optixReason = rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason()
+            if (devices.isEmpty() || optixReason != null) return null
+            val tracer = GpuChoice(GpuChoice.ONE).resolve(devices, optixReason).single().device
+            val card = tracer.takeIf { canUpscale(it) } ?: devices.firstOrNull { canUpscale(it) } ?: return null
+            return try {
+                OptixDenoiser(card, upscaling = true, temporal = true)
+            } catch (t: Throwable) {
+                System.err.println("[gpu] no temporal denoiser for the viewer in motion on ${card.shortName}: ${t.message}")
+                null
+            }
+        }
+
         fun requestedDenoiser(allowUpscale: Boolean = true, temporal: Boolean = false): ImageDenoiser? {
             val wanted = System.getProperty("rt.denoise")?.let { it != "off" } ?: false
             if (!wanted) return null

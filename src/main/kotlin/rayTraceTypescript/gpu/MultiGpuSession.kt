@@ -37,6 +37,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
     @Volatile private var wanted: Pair<Int, GpuScene>? = null
     private var sceneNumber = 0
     private var camera: CameraSetup? = null
+    private var previousCamera: CameraSetup? = null
 
     /** Which accumulation each output is on, and the cards whose outputs add up to it. */
     private val epochs = IntArray(TARGETS)
@@ -51,9 +52,12 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
         cards.forEach { card -> card.post { card.loadScene(wanted) } }
     }
 
-    override fun setCamera(setup: CameraSetup) {
+    override fun setCamera(setup: CameraSetup) = setCamera(setup, null)
+
+    override fun setCamera(setup: CameraSetup, previous: CameraSetup?) {
         // Carried by the next launch: a card sets it when it starts on that launch's samples.
         camera = setup
+        previousCamera = previous
     }
 
     override fun launch(mode: Int, setup: CameraSetup, sampleStart: Int, count: Int, scale: Float, target: Int) {
@@ -120,7 +124,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
         val takers = ready.filter { card -> ready.size == 1 || card.wouldTake(key, count, ready, now) }
         val told = cards.filter { it !in ready || it in takers }
         val range = Range(
-            mode, camera ?: setup, setup, first, first + count, scale, target, seed, sceneNumber, epochs[target],
+            mode, camera ?: setup, previousCamera, setup, first, first + count, scale, target, seed, sceneNumber, epochs[target],
             sliceMs, onProgress, key, told.size, takers
         )
         // The card likely to do most of the work traces on this thread, which would only wait
@@ -159,7 +163,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
 
     /** A range of samples being shared out: what is left, who is on it, and how it ended. */
     private class Range(
-        val mode: Int, val camera: CameraSetup, val setup: CameraSetup, val first: Int, val end: Int, val scale: Float,
+        val mode: Int, val camera: CameraSetup, val previousCamera: CameraSetup?, val setup: CameraSetup, val first: Int, val end: Int, val scale: Float,
         val target: Int, val seed: Long, val sceneNumber: Int, val epoch: Int, val sliceMs: Double,
         val onProgress: ((Int) -> Unit)?, val rateKey: Long, told: Int, ready: List<Card>
     ) {
@@ -342,6 +346,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
 
         // Owned by the card's thread.
         private var camera: CameraSetup? = null
+        private var previousCamera: CameraSetup? = null
         private val epochs = IntArray(TARGETS) { -1 }
         private var scratch = FloatArray(0)
 
@@ -467,9 +472,10 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
                 return
             }
             try {
-                if (camera !== range.camera) {
-                    held.setCamera(range.camera)
+                if (camera !== range.camera || previousCamera !== range.previousCamera) {
+                    held.setCamera(range.camera, range.previousCamera)
                     camera = range.camera
+                    previousCamera = range.previousCamera
                 }
                 held.seed = range.seed
                 // Kernels are built before any sample is timed: a card's speed must not look

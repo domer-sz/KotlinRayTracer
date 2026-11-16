@@ -1260,6 +1260,13 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     float defocusAngle  = cam[18];
     bool flatBackground = cam[19] > 0.5f;
     float3 background   = make_float3(cam[20], cam[21], cam[22]);
+#if GUIDES_ON
+    // Where the camera stood for the frame before, for the flow guide: the same as now in a film.
+    float3 previousCenter  = make_float3(cam[23], cam[24], cam[25]);
+    float3 previousPixel00 = make_float3(cam[26], cam[27], cam[28]);
+    float3 previousDeltaU  = make_float3(cam[29], cam[30], cam[31]);
+    float3 previousDeltaV  = make_float3(cam[32], cam[33], cam[34]);
+#endif
 
     float3 pixelColor = make_float3(0.0f, 0.0f, 0.0f);
     float3 normalSum = make_float3(0.0f, 0.0f, 0.0f);
@@ -1344,22 +1351,38 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                 guide = AOV_MODE == 2 ? first.normal
                     : aov_albedo(matI, texI, texF, images, perlinVectors, perlinPermutations, &first);
                 if (GUIDES_ON) normalSum += first.normal;
-#if RT_OPTIX && GUIDES_ON
-                if (first.turning) {
-                    // Where this point of a turning mesh stood a frame ago, and how far that
-                    // moved it across the screen; the camera stands still.
+#if GUIDES_ON
+                {
+                    // How far this point moved across the screen since the frame before: where it
+                    // is seen now, less where it was seen then - by the camera as it stood, and,
+                    // on a mesh a turntable turns (OptiX knows which), where the mesh stood.
                     float3 p = first.point;
-                    float dx = p.x - params.turnAxisX;
-                    float dz = p.z - params.turnAxisZ;
-                    float3 before = make_float3(params.turnAxisX + params.turnCos * dx + params.turnSin * dz, p.y,
-                                                params.turnAxisZ - params.turnSin * dx + params.turnCos * dz);
+                    float3 before = p;
+#if RT_OPTIX
+                    if (first.turning) {
+                        float dx = p.x - params.turnAxisX;
+                        float dz = p.z - params.turnAxisZ;
+                        before = make_float3(params.turnAxisX + params.turnCos * dx + params.turnSin * dz, p.y,
+                                             params.turnAxisZ - params.turnSin * dx + params.turnCos * dz);
+                    }
+#endif
                     float2 now = screen_position(p, cameraCenter, pixel00, pixelDeltaU, pixelDeltaV);
-                    float2 then = screen_position(before, cameraCenter, pixel00, pixelDeltaU, pixelDeltaV);
+                    float2 then = screen_position(before, previousCenter, previousPixel00, previousDeltaU, previousDeltaV);
                     flowX += now.x - then.x;
                     flowY += now.y - then.y;
                 }
 #endif
             }
+#if GUIDES_ON
+            else {
+                // The background, far along the ray: it moves only as the camera turns.
+                float3 far = origin + direction * (1.0e4f / length(direction));
+                float2 now = screen_position(far, cameraCenter, pixel00, pixelDeltaU, pixelDeltaV);
+                float2 then = screen_position(far, previousCenter, previousPixel00, previousDeltaU, previousDeltaV);
+                flowX += now.x - then.x;
+                flowY += now.y - then.y;
+            }
+#endif
             pixelColor += guide;
             sample++;
             fresh = true;
