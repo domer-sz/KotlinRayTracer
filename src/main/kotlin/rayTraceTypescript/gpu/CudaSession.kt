@@ -16,7 +16,7 @@ import java.nio.FloatBuffer
 
 /**
  * The CUDA backend of [GpuSession]: the scene's buffers in device memory, one module per kernel
- * mode compiled by NVRTC with the scene's features switched in, and the two outputs.
+ * mode compiled by NVRTC with the scene's features switched in, and the outputs.
  */
 internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
@@ -41,14 +41,15 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
     private var sceneArguments: List<Long> = emptyList()
     private val outputs: List<Long>
     /** Host memory reads come back through, sized for the largest output. */
-    private val staging: FloatBuffer = MemoryUtil.memAllocFloat(maxOf(maxPixels * 3, GpuSession.CAMERA_FLOATS))
+    private val stagingMemory = DeviceMemory.allocateHost(maxOf(maxPixels * 3, GpuSession.CAMERA_FLOATS))
+    private val staging: FloatBuffer = stagingMemory.floats
 
     init {
         try {
             cameraBuffer = allocate(GpuSession.CAMERA_FLOATS * 4L).also { buffers += it }
             sceneArguments = upload(initialScene)
             // Read as well as written: every slice of samples after the first adds to it.
-            outputs = List(2) { allocate(maxPixels * 3L * Float.SIZE_BYTES).also { buffers += it } }
+            outputs = List(GpuSession.TARGETS) { allocate(maxPixels * 3L * Float.SIZE_BYTES).also { buffers += it } }
         } catch (t: Throwable) {
             close()
             throw t
@@ -87,7 +88,8 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         MemoryStack.stackPush().use { stack ->
             // cuLaunchKernel takes a pointer to each argument's value, in the kernel's order:
             // the camera and the scene buffers, then the output and the launch's numbers.
-            val pointers = sceneArguments + outputs[target]
+            // The normal guide follows the output; only the guides pass (GUIDES) writes it.
+            val pointers = sceneArguments + outputs[target] + outputs[GpuSession.NORMAL]
             val params = stack.mallocPointer(pointers.size + 10)
             pointers.forEachIndexed { i, buffer -> params.put(i, MemoryUtil.memAddress(stack.longs(buffer))) }
             var at = pointers.size
@@ -135,7 +137,7 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         // -Drt.cuda.options adds compiler flags for experiments, space separated.
         val extra = System.getProperty("rt.cuda.options")?.split(' ')?.filter { it.isNotBlank() } ?: emptyList()
         val options = BUILD_OPTIONS + defines.split(' ').filter { it.isNotBlank() } +
-            listOf("-DAOV_MODE=$mode") + registerCap(extra) + extra
+            listOf("-DAOV_MODE=${GpuSession.aovMode(mode)}", "-DGUIDES=${if (GpuSession.gathersGuides(mode)) 1 else 0}") + registerCap(extra) + extra
         val built = cuda.buildKernel(GpuRenderer.cudaKernelSource(), options)
         System.err.println(
             "[gpu] built the ${GpuSession.MODE_NAMES[mode]} kernel for ${cuda.deviceName} (sm_${cuda.computeCapability}) " +
@@ -165,7 +167,7 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
             sceneMemory.forEach { cuMemFree(it) }
             buffers.forEach { cuMemFree(it) }
         } finally {
-            MemoryUtil.memFree(staging)
+            stagingMemory.free()
             cuda.close()
             keepAwake?.close()
         }

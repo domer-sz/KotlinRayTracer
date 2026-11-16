@@ -94,11 +94,32 @@ interface GpuSession : AutoCloseable {
         const val MODE_ALBEDO = 1
         const val MODE_NORMAL = 2
         const val MODE_SHADED = 3
-        internal val MODE_NAMES = listOf("image", "albedo guide", "normal guide", "shaded preview")
+        /**
+         * Both of the denoiser's guides from one pass over the first hit: the albedo into the
+         * launch's target, the normal into [NORMAL]. Half the rays of the two separate passes.
+         * (Gathering them in the image's own pass instead was tried, and on the RTX 2060 through
+         * OptiX it slowed the image by more than both passes take.)
+         */
+        const val MODE_GUIDES = 4
+        internal val MODE_NAMES = listOf("image", "albedo guide", "normal guide", "shaded preview", "guides")
 
-        /** Output targets: the image, and the scratch buffer the guides use. */
+        /** The kernel's AOV_MODE for [mode], and whether it writes the normal guide beside it. */
+        internal fun aovMode(mode: Int): Int = if (mode == MODE_GUIDES) MODE_ALBEDO else mode
+        internal fun gathersGuides(mode: Int): Boolean = mode == MODE_GUIDES
+
+        /**
+         * Output targets: the image, the scratch buffer guides go to, and the two outputs
+         * [MODE_GUIDES] fills - the albedo, when it is the launch's target, and the normal.
+         */
         const val IMAGE = 0
         const val GUIDE = 1
+        const val ALBEDO = 2
+        const val NORMAL = 3
+        internal const val TARGETS = 4
+
+        /** The outputs a launch in [mode] into [target] writes. */
+        internal fun targetsOf(mode: Int, target: Int): List<Int> =
+            if (gathersGuides(mode)) listOf(target, NORMAL) else listOf(target)
 
         /** Length [traceSliced] aims each launch at. */
         const val SLICE_MS = 200.0

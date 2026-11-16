@@ -51,7 +51,8 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
     private val pipelines = HashMap<Int, Pipeline>()
     private val paramsHost: ByteBuffer = MemoryUtil.memCalloc(PARAMS_BYTES)
     /** Host memory reads come back through, sized for the largest output. */
-    private val staging: FloatBuffer = MemoryUtil.memAllocFloat(maxOf(maxPixels * 3, GpuSession.CAMERA_FLOATS))
+    private val stagingMemory = DeviceMemory.allocateHost(maxOf(maxPixels * 3, GpuSession.CAMERA_FLOATS))
+    private val staging: FloatBuffer = stagingMemory.floats
 
     private lateinit var layout: OptixLayout
     private lateinit var accel: OptixAccel
@@ -87,7 +88,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             cameraBuffer = DeviceMemory.allocate(GpuSession.CAMERA_FLOATS * 4L).also { sessionMemory += it }
             paramsBuffer = DeviceMemory.allocate(PARAMS_BYTES.toLong()).also { sessionMemory += it }
             // Read as well as written: every slice of samples after the first adds to it.
-            outputs = List(2) { DeviceMemory.allocate(maxPixels * 3L * Float.SIZE_BYTES).also { sessionMemory += it } }
+            outputs = List(GpuSession.TARGETS) { DeviceMemory.allocate(maxPixels * 3L * Float.SIZE_BYTES).also { sessionMemory += it } }
             load(scene)
         } catch (t: Throwable) {
             close()
@@ -121,7 +122,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // The kernel's Params: pointers and 64-bit numbers first, then the 32-bit ones.
         paramsHost.clear()
         sceneArguments.forEach { paramsHost.putLong(it) }
-        paramsHost.putLong(outputs[target]).putLong(quadIds).putLong(instanceTable).putLong(palette)
+        paramsHost.putLong(outputs[target]).putLong(outputs[GpuSession.NORMAL]).putLong(quadIds).putLong(instanceTable).putLong(palette)
             .putLong(top!!.handle).putLong(seed)
         // The root node is the CUDA kernel's: OptiX searches its own trees.
         paramsHost.putInt(setup.imageWidth).putInt(setup.imageHeight).putInt(sampleStart).putInt(count)
@@ -168,7 +169,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         } finally {
             names.values.forEach { MemoryUtil.memFree(it) }
             MemoryUtil.memFree(paramsHost)
-            MemoryUtil.memFree(staging)
+            stagingMemory.free()
             cuda.close()
             keepAwake?.close()
         }
@@ -333,7 +334,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // -Drt.cuda.options adds compiler flags for experiments, space separated.
         val extra = System.getProperty("rt.cuda.options")?.split(' ')?.filter { it.isNotBlank() } ?: emptyList()
         val options = BUILD_OPTIONS + defines.split(' ').filter { it.isNotBlank() } +
-            listOf("-DAOV_MODE=$mode", "-DRT_OPTIX=1", OptixApi.includeOption()) + extra
+            listOf("-DAOV_MODE=${GpuSession.aovMode(mode)}", "-DGUIDES=${if (GpuSession.gathersGuides(mode)) 1 else 0}", "-DRT_OPTIX=1", OptixApi.includeOption()) + extra
         // -Drt.optix.ptx hands OptiX PTX, the older form, instead of OptiX IR.
         val program = cuda.buildOptixProgram(GpuRenderer.cudaKernelSource(), options, ptx = System.getProperty("rt.optix.ptx") != null)
         val compiled = System.nanoTime()
@@ -461,7 +462,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
 
         /** The kernel's Params: 27 pointers and 64-bit numbers, then 10 numbers of 32 bits - a multiple of 8 as it is. */
         private const val PARAMS_PADDING = 0
-        private const val PARAMS_BYTES = 27 * 8 + 10 * 4 + PARAMS_PADDING
+        private const val PARAMS_BYTES = 28 * 8 + 10 * 4 + PARAMS_PADDING
         /** The kernel's Instance: three pointers, then six numbers of 32 bits. */
         private const val INSTANCE_BYTES = 3 * 8 + 6 * 4
         /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance. */

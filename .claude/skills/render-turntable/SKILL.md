@@ -154,7 +154,8 @@ that day, and a denoised still at angle 0 now sits 31.8 dB / SSIM 0.914 from v4'
     because that film still turned the figure about the middle of its box, StlViewer about its
     foot (1.1 mm apart for Yennefer; gold's sharp highlights show even that). Turned about its
     foot, as films are since (gpu/Footprint), 180 degrees sits 33.9 dB / SSIM 0.915 from v4's
-    frame 225;
+    frame 225. 2026-11-16, both guides from one pass and reads through page-locked memory:
+    0.50 s a frame (30 frames, twice: tracing 405 / 407 ms, guides 70 ms against 87 before);
   - `-Drt.denoiser=oidn` (as all films before this day): 1.51 s a frame, of it 893 ms waiting for
     OIDN on the CPU (1447 ms a frame);
   - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.

@@ -118,9 +118,14 @@ __device__ inline float3 xyz(float4 a) { return make_float3(a.x, a.y, a.z); }
 // image: the albedo (1) or the normal (2) of whatever the camera ray hits first.
 /** Glass surfaces the quick look (AOV_MODE 3) sees through, and the one it stops at. */
 #define PREVIEW_LAYERS 5
+#ifndef GUIDES
+#define GUIDES 0
+#endif
 #ifndef AOV_MODE
 #define AOV_MODE 0
 #endif
+// With GUIDES, the albedo guide (AOV_MODE 1) writes the normal guide beside it from the same rays.
+#define GUIDES_ON (GUIDES && AOV_MODE == 1)
 
 // ---------------------------------------------------------------- random numbers
 
@@ -303,6 +308,7 @@ struct Params {
     const int* perlinPermutations;
     const float* triangleNormals;        // the loose triangles' corner normals, as the CUDA kernel's argument
     float* out;
+    float* guideNormal;                  // with GUIDES, the normal guide the albedo guide's rays find
     const int* quadIds;                  // the quad each pair of triangles in the tree stands for
     const Instance* instances;
     const int* palette;
@@ -1087,6 +1093,7 @@ extern "C" __global__ void __raygen__render() {
     const float* triangleNormals = params.triangleNormals;
     const float fireflyClamp = params.fireflyClamp;
     float* out = params.out;
+    float* guideNormal = params.guideNormal;
     const int width = params.width;
     const int height = params.height;
     const int sampleStart = params.sampleStart;
@@ -1125,6 +1132,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                      const int* __restrict__ perlinPermutations,
                      const float* __restrict__ triangleNormals,
                      float* out,
+                     float* guideNormal,
                      const int width,
                      const int height,
                      const int sampleStart,
@@ -1171,6 +1179,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     float3 background   = make_float3(cam[20], cam[21], cam[22]);
 
     float3 pixelColor = make_float3(0.0f, 0.0f, 0.0f);
+    float3 normalSum = make_float3(0.0f, 0.0f, 0.0f);
 
     // One bounce per iteration rather than a loop over samples around a loop over bounces: a
     // thread whose path has ended starts its next sample straight away, so the threads of a
@@ -1250,6 +1259,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
             if (world_hit(&scene, rootNode, origin, direction, time, 0.001f, INFINITY, &rng, &first)) {
                 guide = AOV_MODE == 2 ? first.normal
                     : aov_albedo(matI, texI, texF, images, perlinVectors, perlinPermutations, &first);
+                if (GUIDES_ON) normalSum += first.normal;
             }
             pixelColor += guide;
             sample++;
@@ -1342,4 +1352,9 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     out[base]     = pixelColor.x;
     out[base + 1] = pixelColor.y;
     out[base + 2] = pixelColor.z;
+    if (GUIDES_ON) {
+        normalSum *= pixelSamplesScale;
+        if (sampleStart > 0) normalSum += make_float3(guideNormal[base], guideNormal[base + 1], guideNormal[base + 2]);
+        guideNormal[base] = normalSum.x; guideNormal[base + 1] = normalSum.y; guideNormal[base + 2] = normalSum.z;
+    }
 }

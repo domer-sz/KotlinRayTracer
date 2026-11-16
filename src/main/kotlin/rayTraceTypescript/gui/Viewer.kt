@@ -1013,14 +1013,8 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     }
 
     /** The denoiser's albedo and normal guides for the current view, averaged over a few samples. */
-    private fun renderGuides(session: GpuSession, setup: CameraSetup): Pair<FloatArray, FloatArray> {
-        fun guide(mode: Int): FloatArray {
-            // In slices, so a heavy scene at a large size never holds the GPU past the watchdog.
-            session.traceSliced(mode, setup, GUIDE_SAMPLES, GpuSession.GUIDE)
-            return FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.GUIDE, it) }
-        }
-        return guide(GpuSession.MODE_ALBEDO) to guide(GpuSession.MODE_NORMAL)
-    }
+    private fun renderGuides(session: GpuSession, setup: CameraSetup): Pair<FloatArray, FloatArray> =
+        GpuRenderer.renderGuides(session, setup, GUIDE_SAMPLES)
 
     private fun save(setup: CameraSetup, sums: FloatArray, samples: Int, denoised: FloatArray?) {
         saveRequested = false

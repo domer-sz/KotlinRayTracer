@@ -45,8 +45,9 @@ class GpuRenderer : Renderer {
                     // The guides only see the first hit, so a few hundred samples leave them
                     // clean; the denoiser needs them antialiased like the image, not more.
                     val guideSamples = minOf(setup.samplesPerPixel, GUIDE_SAMPLES)
-                    val albedo = renderAll(session, setup, GpuSession.MODE_ALBEDO, guideSamples, GpuSession.GUIDE)
-                    val normal = renderAll(session, setup, GpuSession.MODE_NORMAL, guideSamples, GpuSession.GUIDE)
+                    val start = System.nanoTime()
+                    val (albedo, normal) = renderGuides(session, setup, guideSamples)
+                    System.err.println("[gpu] guides: ${(System.nanoTime() - start) / 1_000_000} ms")
                     // -Drt.denoise.repeat=N denoises the image N times more, to time a denoiser once it is set up.
                     val runs = 1 + (System.getProperty("rt.denoise.repeat")?.toIntOrNull() ?: 0).coerceIn(0, 100)
                     var clean = pixels
@@ -98,6 +99,19 @@ class GpuRenderer : Renderer {
         /** Samples for the denoiser guides; they only see the first hit, so few are enough. */
         private const val GUIDE_SAMPLES = 256
         fun unavailabilityReason(): String? = GpuSession.unavailabilityReason()
+
+        /**
+         * The denoiser's albedo and normal guides for [setup], averaged over [samples], from one
+         * pass over the first hit ([GpuSession.MODE_GUIDES]), in slices of about [sliceMs] so a
+         * heavy scene at a large size never holds the GPU past the watchdog.
+         */
+        fun renderGuides(
+            session: GpuSession, setup: CameraSetup, samples: Int, sliceMs: Double = GpuSession.SLICE_MS
+        ): Pair<FloatArray, FloatArray> {
+            session.traceSliced(GpuSession.MODE_GUIDES, setup, samples, GpuSession.ALBEDO, sliceMs)
+            fun read(target: Int) = FloatArray(setup.totalPixels * 3).also { session.read(target, it) }
+            return read(GpuSession.ALBEDO) to read(GpuSession.NORMAL)
+        }
 
         /** Set once the OptiX denoiser has turned out not to start here: the rest of the run denoises with OIDN. */
         @Volatile private var optixDenoiserFailed = false

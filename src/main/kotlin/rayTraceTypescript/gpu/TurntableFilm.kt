@@ -144,12 +144,7 @@ object TurntableFilm {
                 val image = FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.IMAGE, it) }
                 val guideStart = System.nanoTime()
                 val guides = denoiser?.let {
-                    val guideSamples = minOf(settings.samples, GUIDE_SAMPLES)
-                    fun guide(mode: Int): FloatArray {
-                        session.traceSliced(mode, setup, guideSamples, GpuSession.GUIDE, SLICE_MS)
-                        return FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.GUIDE, it) }
-                    }
-                    guide(GpuSession.MODE_ALBEDO) to guide(GpuSession.MODE_NORMAL)
+                    GpuRenderer.renderGuides(session, setup, minOf(settings.samples, GUIDE_SAMPLES), SLICE_MS)
                 }
                 val waitStart = System.nanoTime()
                 // The frame before must be in the film before this one goes after it.

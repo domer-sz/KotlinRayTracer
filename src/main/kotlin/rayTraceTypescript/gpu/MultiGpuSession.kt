@@ -41,6 +41,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
     /** Which accumulation each output is on, and the cards whose outputs add up to it. */
     private val epochs = IntArray(TARGETS)
     private val holders = Array(TARGETS) { LinkedHashSet<Card>() }
+    private var epochCount = 0
 
     override val devices: List<String> get() = cards.flatMap { it.devices() }
 
@@ -79,7 +80,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
 
     override fun clear(target: Int) {
         // Nothing to do on the cards now: each empties its output when it first adds to the new accumulation.
-        epochs[target]++
+        epochs[target] = ++epochCount
         holders[target].clear()
     }
 
@@ -101,9 +102,15 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
         sliceMs: Double, onProgress: ((Int) -> Unit)?
     ): Int {
         if (count <= 0) return 0
+        val written = GpuSession.targetsOf(mode, target)
         if (first == 0) {
-            epochs[target]++
-            holders[target].clear()
+            // A new accumulation on every output the launch writes, under one number, which is
+            // how a card tells whether its own outputs are on it.
+            val epoch = ++epochCount
+            for (t in written) {
+                epochs[t] = epoch
+                holders[t].clear()
+            }
         }
         val key = mode.toLong() shl 40 or setup.totalPixels.toLong()
         val now = System.nanoTime()
@@ -123,7 +130,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
         told.forEach { card -> if (card !== leader) card.post { card.trace(range) } }
         leader?.now { leader.trace(range) }
         val launches = range.await()
-        holders[target] += range.tracers()
+        written.forEach { holders[it] += range.tracers() }
         if (LOG) report(System.nanoTime() - now, count)
         return launches
     }
@@ -473,11 +480,13 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
                 while (true) {
                     val chunk = range.claim(this) ?: break
                     try {
-                        if (epochs[range.target] != range.epoch) {
-                            // The first of its samples in this accumulation: a launch at sample 0
-                            // overwrites the output by itself, any other adds and needs it empty.
-                            if (chunk[0] > 0) held.clear(range.target)
-                            epochs[range.target] = range.epoch
+                        for (t in GpuSession.targetsOf(range.mode, range.target)) {
+                            if (epochs[t] != range.epoch) {
+                                // The first of its samples in this accumulation: a launch at sample 0
+                                // overwrites the output by itself, any other adds and needs it empty.
+                                if (chunk[0] > 0) held.clear(t)
+                                epochs[t] = range.epoch
+                            }
                         }
                         val start = System.nanoTime()
                         held.launch(range.mode, range.setup, chunk[0], chunk[1], range.scale, range.target)
@@ -488,7 +497,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
                         tracedNs.addAndGet(end - start)
                     } catch (t: Throwable) {
                         broken = t
-                        epochs[range.target] = -1
+                        GpuSession.targetsOf(range.mode, range.target).forEach { epochs[it] = -1 }
                         System.err.println("[gpu] $label failed while tracing: ${t.message ?: t}")
                         range.fail(this, t)
                         return
@@ -521,7 +530,7 @@ internal class MultiGpuSession private constructor(private val cards: List<Card>
     }
 
     companion object {
-        private const val TARGETS = 2
+        private const val TARGETS = GpuSession.TARGETS
         /** How many times a card's turn may grow from one launch to the next. */
         private const val GROWTH = 4
         /** How long, in waits of so many milliseconds, the quickest card leaves the last samples to the card they are kept for. */
