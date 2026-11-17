@@ -40,13 +40,13 @@ import javax.imageio.ImageIO
  * with the same sample count; only the random streams differ, so the images are compared
  * statistically.
  *
- * Here the renderer picks cards and engines as it does by default - every card, OptiX where it
- * can. [SingleCardCpuComparisonTest] and [OptixCpuComparisonTest] put the same scenes and the
- * same yardstick to one card on the CUDA kernel and to the OptiX engine.
+ * Here the renderer picks the card and engine as it does by default - the best card, OptiX where
+ * it can. [CudaCpuComparisonTest] and [OptixCpuComparisonTest] put the same scenes and the
+ * same yardstick to the CUDA kernel and to the OptiX engine.
  */
 open class GpuCpuComparisonTest {
 
-    /** The -Drt.gpus / -Drt.backend switches the renders run under; none leaves the defaults. */
+    /** The -Drt.gpu / -Drt.backend switches the renders run under; none leaves the defaults. */
     protected open val settings: Map<String, String> = emptyMap()
 
     @Test

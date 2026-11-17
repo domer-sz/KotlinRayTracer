@@ -15,7 +15,8 @@ import kotlin.random.Random
  * the same kernels as long as the scene needs the same features. Launches block until the GPU
  * is done; a session belongs to one thread.
  *
- * [open] makes one; the implementation is [CudaSession].
+ * [open] makes one, on one card: [CudaSession] for the renderer's own kernel, OptiX's
+ * [rayTraceTypescript.gpu.optix.OptixSession], or [SwitchingSession] between them.
  */
 interface GpuSession : AutoCloseable {
     /**
@@ -50,20 +51,8 @@ interface GpuSession : AutoCloseable {
     /** Copies the first [into].size floats of [target] back to the host. */
     fun read(target: Int, into: FloatArray)
 
-    /**
-     * Empties [target], so that a launch may add to it whatever sample it starts at. Cards that
-     * share an image need it: each traces some of the samples, and only one of them the first.
-     */
-    fun clear(target: Int)
-
-    /**
-     * Builds what tracing in [mode] needs - its kernel - unless it is built. A launch does so
-     * anyway; calling this first keeps the compiler's time out of a launch that is being timed.
-     */
-    fun prepare(mode: Int)
-
-    /** The cards tracing and their engines, for a status line: "RTX 2060 (OptiX)". */
-    val devices: List<String>
+    /** The card tracing and its engine, for a status line: "RTX 2060 (OptiX)". */
+    val device: String
 
     /**
      * Whether the guides pass fills [FLOW] with how far each pixel's first hit moved since the
@@ -145,22 +134,16 @@ interface GpuSession : AutoCloseable {
         internal const val CAMERA_FLOATS = 35
 
         /**
-         * A session for [scene], with outputs for up to [maxPixels] pixels, on the cards and with
-         * the engines [choice] names: by default every card, through OptiX where the card has RT
-         * cores and through the renderer's own CUDA kernel elsewhere. One card is driven directly;
-         * several share each image's samples ([MultiGpuSession]).
-         *
-         * In `all`, a card that cannot be started is left out with a message, as long as one is
-         * left; a card named outright that fails is an error.
+         * A session for [scene], with outputs for up to [maxPixels] pixels, on the card and with the
+         * engine [choice] names: by default the best card, through OptiX where it has RT cores and
+         * through the renderer's own CUDA kernel elsewhere. It belongs to the calling thread.
          */
         fun open(scene: GpuScene, maxPixels: Int, choice: GpuChoice = GpuChoice.fromProperties()): GpuSession {
-            val picks = choice.resolve(CudaContext.devices(), rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason())
-            if (picks.size == 1) return openOn(picks.single(), scene, maxPixels)
-            return MultiGpuSession.open(picks, scene, maxPixels, lenient = choice.gpus.trim().lowercase() == GpuChoice.ALL)
+            val pick = choice.resolve(CudaContext.devices(), rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason())
+            return openOn(pick, scene, maxPixels)
         }
 
-        /** A session on one card, for the calling thread. */
-        internal fun openOn(pick: GpuPick, scene: GpuScene, maxPixels: Int): GpuSession = when {
+        private fun openOn(pick: GpuPick, scene: GpuScene, maxPixels: Int): GpuSession = when {
             pick.engine == Engine.CUDA -> CudaSession(scene, maxPixels, pick.device)
             pick.fallback -> SwitchingSession(pick.device, scene, maxPixels)
             else -> rayTraceTypescript.gpu.optix.OptixSession(scene, maxPixels, pick.device)

@@ -41,7 +41,7 @@ class FlowGuideTest {
         val figure = PlacedMesh(MeshBlock(octahedron()), 1.4f, 20.0f, Vector(0.2f, 0.0f, -0.1f), figureMaterial, turning = true)
         val world = HittableList(mutableListOf(floor(), figure))
 
-        val flow = GpuSession.open(SceneFlattener.scene(world), setup.totalPixels, GpuChoice(gpus = "0:optix")).use { session ->
+        val flow = GpuSession.open(SceneFlattener.scene(world), setup.totalPixels, GpuChoice(gpu = "0", backend = "optix")).use { session ->
             assertTrue(session.tracesFlow)
             session.setCamera(setup)
             session.setTurn(turn)
@@ -88,14 +88,14 @@ class FlowGuideTest {
     }
 
     @Test
-    fun `cuda flow follows a moving camera`() = cameraFlow("0:cuda")
+    fun `cuda flow follows a moving camera`() = cameraFlow("cuda")
 
     @Test
     fun `optix flow follows a moving camera`() {
         // The card first: OptiX's library is found beside the CUDA one, once that is loaded.
         assumeTrue(GpuRenderer.unavailabilityReason() == null, "No CUDA device available")
         assumeTrue(OptixApi.unavailabilityReason() == null, "OptiX is not available")
-        cameraFlow("0:optix")
+        cameraFlow("optix")
     }
 
     /**
@@ -103,7 +103,7 @@ class FlowGuideTest {
      * does while dragged: each hit moves across the screen by where the camera sees it now less
      * where it saw it then.
      */
-    private fun cameraFlow(gpus: String) {
+    private fun cameraFlow(backend: String) {
         val gpu = GpuRenderer.unavailabilityReason()
         assumeTrue(gpu == null, "No CUDA device available: $gpu")
         val setup = camera().initialize()
@@ -111,7 +111,7 @@ class FlowGuideTest {
         val figure = PlacedMesh(MeshBlock(octahedron()), 1.4f, 20.0f, Vector(0.2f, 0.0f, -0.1f), Lambertian(Color(0.7f, 0.5f, 0.3f)))
         val world = HittableList(mutableListOf(floor(), figure))
 
-        val flow = GpuSession.open(SceneFlattener.scene(world), setup.totalPixels, GpuChoice(gpus = gpus)).use { session ->
+        val flow = GpuSession.open(SceneFlattener.scene(world), setup.totalPixels, GpuChoice(gpu = "0", backend = backend)).use { session ->
             session.setCamera(setup, previous)
             GpuRenderer.renderGuides(session, setup, 64)
             FloatArray(setup.totalPixels * 3).also { session.read(GpuSession.FLOW, it) }
@@ -132,7 +132,7 @@ class FlowGuideTest {
             largest = maxOf(largest, abs(ex), abs(ey))
             counted++
         }
-        println("camera flow ($gpus): $counted pixels, mean error ${errorSum / counted} px, largest flow $largest px")
+        println("camera flow ($backend): $counted pixels, mean error ${errorSum / counted} px, largest flow $largest px")
         assertTrue(counted > 1000, "only $counted pixels inside one surface")
         assertTrue(largest > 2.0f, "the camera moved the image by at most $largest pixels")
         assertTrue(errorSum / counted < 0.03f, "the flow is off by ${errorSum / counted} pixels on average")

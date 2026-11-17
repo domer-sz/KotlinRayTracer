@@ -217,8 +217,7 @@ class OptixCudaComparisonTest {
             this.lights = lights
         }
         val target = Files.createTempFile("raytracer-optix-test", ".ppm")
-        val before = mapOf("rt.gpus" to System.getProperty("rt.gpus"), "rt.backend" to System.getProperty("rt.backend"))
-        System.setProperty("rt.gpus", "one")
+        val before = mapOf("rt.backend" to System.getProperty("rt.backend"))
         System.setProperty("rt.backend", backend)
         RandomSource.withSeed(seed)
         return try {

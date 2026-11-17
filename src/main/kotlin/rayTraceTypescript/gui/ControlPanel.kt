@@ -56,39 +56,7 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         toolTipText = "Ile razy promień może się odbić lub załamać, zanim ścieżka się urwie. " +
             "Mniej: szybciej, ciemniej w zakamarkach i w szkle; więcej: pełniejsze światło odbite."
     }
-    /**
-     * What the list of cards offers, as (label, -Drt.gpus value): all of them, each by itself,
-     * and - when the window was started with a choice the list cannot spell, such as an engine
-     * per card - that choice as it was typed.
-     */
-    private val gpuOptions: List<Pair<String, String>> = run {
-        val devices = viewer.gpuDevices
-        // With a card kept for denoising, "all" traces on the others: the list says so, and
-        // offers every card tracing (that one denoising as well) as a choice of its own.
-        val tracing = try {
-            viewer.gpuChoice.copy(gpus = rayTraceTypescript.gpu.GpuChoice.ALL)
-                .resolve(devices, rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason()).map { it.device }
-        } catch (t: Throwable) {
-            devices
-        }
-        val denoising = viewer.gpuChoice.denoising
-        val default = if (denoising != null && tracing.size < devices.size) {
-            listOf(
-                "${tracing.joinToString(" + ") { it.shortName }} śledzi, ${denoising.shortName} odszumia" to rayTraceTypescript.gpu.GpuChoice.ALL,
-                "Wszystkie śledzą (${devices.size})" to devices.joinToString(",") { it.ordinal.toString() }
-            )
-        } else {
-            listOf("Wszystkie (${devices.size})" to rayTraceTypescript.gpu.GpuChoice.ALL)
-        }
-        val standard = default + devices.map { it.shortName to it.ordinal.toString() }
-        val started = viewer.gpuChoice.gpus
-        if (indexOfGpus(standard, started) >= 0) standard else standard + ("-Drt.gpus=$started" to started)
-    }
-    private val gpus = JComboBox(gpuOptions.map { it.first }.toTypedArray()).apply {
-        selectedIndex = indexOfGpus(gpuOptions, viewer.gpuChoice.gpus).coerceAtLeast(0)
-        toolTipText = "Karty graficzne, które liczą obraz (-Drt.gpus)"
-    }
-    /** The cards tracing right now and the engine of each, as the GPU session names them. */
+    /** The card tracing and its engine, and what denoises (-Drt.gpu, -Drt.backend, -Drt.denoiser.gpu). */
     private val gpusInUse = JLabel(viewer.gpusInUse.ifEmpty { " " }).apply {
         font = Theme.font(11.5f)
         foreground = Theme.muted
@@ -215,11 +183,7 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         full(applySize)
         field("Cel spp", target)
         field("Odbicia (maks.)", depth)
-        // With one card there is nothing to choose.
-        if (viewer.gpuDevices.size > 1) {
-            field("Karty", gpus)
-            full(gpusInUse)
-        }
+        full(gpusInUse)
         full(progress)
         full(denoise)
         full(save)
@@ -287,7 +251,6 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         }
         target.addChangeListener { viewer.targetSamples = target.value as Int }
         depth.addChangeListener { viewer.maxDepth = depth.value as Int }
-        gpus.addActionListener { viewer.gpuChoice = viewer.gpuChoice.copy(gpus = gpuOptions[gpus.selectedIndex].second) }
         denoise.addActionListener { viewer.denoiseOn = denoise.isSelected }
         saveSceneButton.addActionListener { chooseSceneToSave() }
         loadSceneButton.addActionListener { chooseSceneToLoad() }
@@ -448,7 +411,7 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         }
     }
 
-    /** Shows which cards are tracing and with what, e.g. "RTX 2060 (OptiX) + GTX 1070 (CUDA)". */
+    /** Shows which card traces and with what, and what denoises, e.g. "RTX 2060 (OptiX) · odszumia OptiX (GTX 1070)". */
     fun showGpus(inUse: String) {
         gpusInUse.text = inUse
     }
@@ -624,8 +587,5 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         /** The preset list's entry for a model made of the materials its file names. */
         private const val FILE_COLOURS = "Kolory z pliku"
 
-        /** Where the -Drt.gpus value [gpus] stands among [options] (label, value), or -1. */
-        private fun indexOfGpus(options: List<Pair<String, String>>, gpus: String): Int =
-            options.indexOfFirst { it.second.equals(gpus.trim(), ignoreCase = true) }
     }
 }

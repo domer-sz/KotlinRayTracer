@@ -178,17 +178,12 @@ class CudaContext private constructor(
     }
 
     companion object {
-        /** Device name filter, e.g. RT_GPU_DEVICE=1070 (RT_OPENCL_DEVICE is still read). */
-        private const val DEVICE_FILTER_ENV = "RT_GPU_DEVICE"
         /** Where the repository keeps NVRTC, relative to the project root. */
         private const val BUNDLED_NVRTC = "native/cuda/windows-x64"
         private const val NVRTC_DLL = "nvrtc64_120_0.dll"
         private val NVRTC_BUILTINS_DLL = Regex("nvrtc-builtins64_\\d+\\.dll", RegexOption.IGNORE_CASE)
 
         @Volatile private var initialised = false
-
-        /** The name filter RT_GPU_DEVICE gives (RT_OPENCL_DEVICE is still read), null without one. */
-        fun deviceFilter(): String? = (System.getenv(DEVICE_FILTER_ENV) ?: System.getenv("RT_OPENCL_DEVICE"))?.takeIf { it.isNotBlank() }
 
         /** Every CUDA device, in the driver's order - which puts the fastest first. */
         fun devices(): List<GpuDevice> {
@@ -223,14 +218,8 @@ class CudaContext private constructor(
             }
         }
 
-        /** A context on the first device whose name holds [filter]; on the first device without one. */
-        fun create(filter: String? = deviceFilter()): CudaContext {
-            val devices = devices()
-            if (devices.isEmpty()) throw CudaException("no CUDA device found")
-            val device = devices.firstOrNull { filter.isNullOrBlank() || it.name.contains(filter, ignoreCase = true) }
-                ?: throw CudaException("no CUDA device matches $DEVICE_FILTER_ENV=$filter (found ${devices.joinToString { it.name }})")
-            return create(device)
-        }
+        /** A context on the first device, for checking that CUDA works. */
+        fun create(): CudaContext = create(devices().firstOrNull() ?: throw CudaException("no CUDA device found"))
 
         /** Null when a CUDA device and NVRTC are usable, otherwise a short reason. */
         fun unavailabilityReason(): String? = try {

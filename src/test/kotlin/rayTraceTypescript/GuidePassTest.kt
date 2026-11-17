@@ -22,24 +22,20 @@ import kotlin.math.abs
 /**
  * The one guide pass ([GpuSession.MODE_GUIDES]) must give the albedo and the normal the two
  * separate guide passes give: the camera rays are the same - keyed by pixel and sample - so only
- * the order of float sums may differ. On each engine, and on two sessions sharing the samples,
- * where the normal has to be summed across cards beside the albedo.
+ * the order of float sums may differ. On each engine.
  */
 class GuidePassTest {
 
     @Test
-    fun `the cuda kernel traces both guides in one pass`() = check("0:cuda")
+    fun `the cuda kernel traces both guides in one pass`() = check("cuda")
 
     @Test
     fun `optix traces both guides in one pass`() {
         assumeTrue(OptixApi.unavailabilityReason() == null, "OptiX is not available")
-        check("0:optix")
+        check("optix")
     }
 
-    @Test
-    fun `two sessions sharing the samples sum both guides`() = check("0:cuda,0:cuda")
-
-    private fun check(gpus: String) {
+    private fun check(backend: String) {
         val gpu = GpuRenderer.unavailabilityReason()
         assumeTrue(gpu == null, "No CUDA device available: $gpu")
         val setup = camera().initialize()
@@ -56,7 +52,7 @@ class GuidePassTest {
                 light
             )
         )
-        GpuSession.open(SceneFlattener.scene(world, light), setup.totalPixels, GpuChoice(gpus = gpus)).use { session ->
+        GpuSession.open(SceneFlattener.scene(world, light), setup.totalPixels, GpuChoice(gpu = "0", backend = backend)).use { session ->
             session.seed = 4242L
             session.setCamera(setup)
             fun trace(mode: Int, target: Int, vararg reads: Int): List<FloatArray> {

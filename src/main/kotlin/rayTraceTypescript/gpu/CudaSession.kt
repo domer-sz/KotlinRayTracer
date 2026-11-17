@@ -21,7 +21,7 @@ import java.nio.FloatBuffer
 internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
     private val cuda = CudaContext.create(device)
-    override val devices: List<String> = listOf(GpuPick(device, Engine.CUDA).toString())
+    override val device: String = GpuPick(device, Engine.CUDA).toString()
     /** Device memory the session keeps: the camera and the outputs. */
     private val buffers = mutableListOf<Long>()
     /** The scene's device memory, freed when it is replaced. */
@@ -121,17 +121,6 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         staging.limit(into.size)
         CudaContext.check(cuMemcpyDtoH(staging, outputs[target]), "cuMemcpyDtoH")
         staging.get(into)
-    }
-
-    override fun clear(target: Int) {
-        cuda.makeCurrent()
-        // All bits zero is 0.0f.
-        CudaContext.check(cuMemsetD32(outputs[target], 0, maxPixels * 3L), "cuMemsetD32")
-    }
-
-    override fun prepare(mode: Int) {
-        cuda.makeCurrent()
-        kernel(mode)
     }
 
     /** The compiled kernel for [mode], built on first use. */

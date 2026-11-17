@@ -10,7 +10,7 @@ import rayTraceTypescript.render.CameraSetup
  * new scene does for its callers anyway. Since OptiX traces spheres and fog, the only scene it
  * leaves to the CUDA kernel is one of nothing but fog, which gives it no tree to build.
  */
-internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, private val maxPixels: Int) : GpuSession {
+internal class SwitchingSession(private val card: GpuDevice, scene: GpuScene, private val maxPixels: Int) : GpuSession {
     private var current: GpuSession = openFor(scene)
     private var camera: CameraSetup? = null
     private var previousCamera: CameraSetup? = null
@@ -21,7 +21,7 @@ internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, 
             current.seed = value
         }
 
-    override val devices: List<String> get() = current.devices
+    override val device: String get() = current.device
     override val tracesFlow: Boolean get() = current.tracesFlow
     private var turn: FrameTurn? = null
 
@@ -57,15 +57,11 @@ internal class SwitchingSession(private val device: GpuDevice, scene: GpuScene, 
 
     override fun read(target: Int, into: FloatArray) = current.read(target, into)
 
-    override fun clear(target: Int) = current.clear(target)
-
-    override fun prepare(mode: Int) = current.prepare(mode)
-
     override fun close() = current.close()
 
     private fun openFor(scene: GpuScene): GpuSession {
-        val reason = OptixSession.unsupported(scene.instanced) ?: return OptixSession(scene, maxPixels, device)
-        System.err.println("[gpu] ${device.shortName} traces with the CUDA kernel: $reason")
-        return CudaSession(scene, maxPixels, device)
+        val reason = OptixSession.unsupported(scene.instanced) ?: return OptixSession(scene, maxPixels, card)
+        System.err.println("[gpu] ${card.shortName} traces with the CUDA kernel: $reason")
+        return CudaSession(scene, maxPixels, card)
     }
 }

@@ -127,25 +127,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
      */
     @Volatile var raytrace = System.getProperty("rt.gui.raytrace") != null
 
-    /** The cards of this machine, for the panel's list; empty where they cannot be listed. */
-    val gpuDevices: List<rayTraceTypescript.gpu.GpuDevice> = try {
-        rayTraceTypescript.gpu.CudaContext.devices()
-    } catch (t: Throwable) {
-        emptyList()
-    }
-    private val gpuVersion = AtomicInteger(0)
-    /**
-     * Which cards render and with which engine: -Drt.gpus and -Drt.backend to start with, then
-     * what the panel's list says. A change opens the GPU session afresh.
-     */
-    @Volatile var gpuChoice: rayTraceTypescript.gpu.GpuChoice = rayTraceTypescript.gpu.GpuChoice.fromProperties()
-        set(value) {
-            if (value == field) return
-            field = value
-            gpuVersion.incrementAndGet()
-            touch()
-        }
-    /** The cards tracing right now and their engines, as the GPU session names them. */
+    /** The card tracing and its engine, and what denoises, for the panel: "RTX 2060 (OptiX) · odszumia OptiX (GTX 1070)". */
     @Volatile var gpusInUse = ""
         private set
 
@@ -697,35 +679,28 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     private fun renderLoop() {
         var session: GpuSession? = null
         var capacity = 0
-        var openedOn: rayTraceTypescript.gpu.GpuChoice? = null
         try {
             // The viewer denoises its own images at their size: no enlarging (-Drt.upscale) here.
             GpuRenderer.requestedDenoiser(allowUpscale = false).use { denoiser ->
                 denoiserReady = denoiser != null
-                // The card kept for denoising is the one the denoiser actually started on: if it
-                // did not start, no card sits out of the tracing for it.
-                gpuChoice = gpuChoice.copy(denoising = (denoiser as? rayTraceTypescript.gpu.optix.OptixDenoiser)?.device)
                 val open = { pixels: Int ->
                     val start = System.nanoTime()
                     val buffers = SceneFlattener.scene(buildWorld(), activeLights())
                     val flattened = System.nanoTime()
                     val current = session
-                    val choice = gpuChoice
-                    // An edited scene goes into the session there is; a bigger image, or other
-                    // cards to render on, need a new one.
-                    val next = if (current != null && pixels <= capacity && choice == openedOn) {
+                    // An edited scene goes into the session there is; a bigger image needs a new one.
+                    val next = if (current != null && pixels <= capacity) {
                         current.also { it.replaceScene(buffers) }
                     } else {
                         current?.close()
                         session = null
-                        GpuSession.open(buffers, pixels, choice).also {
+                        GpuSession.open(buffers, pixels).also {
                             session = it
                             capacity = pixels
-                            openedOn = choice
                         }
                     }
-                    // Which cards are tracing, and how, shows under the panel's list of cards.
-                    val inUse = next.devices.joinToString(" + ") + (denoiser?.let { " · odszumia ${it.name}" } ?: "")
+                    // Which card traces, and how, shows in the panel.
+                    val inUse = next.device + (denoiser?.let { " · odszumia ${it.name}" } ?: "")
                     gpusInUse = inUse
                     SwingUtilities.invokeLater { if (::controls.isInitialized) controls.showGpus(inUse) }
                     System.err.println("[viewer] scene rebuilt: flatten ${(flattened - start) / 1_000_000} ms, upload ${(System.nanoTime() - flattened) / 1_000_000} ms")
@@ -753,7 +728,6 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     private fun loop(denoiser: ImageDenoiser?, motion: ImageDenoiser?, open: (Int) -> GpuSession) {
         var session: GpuSession? = null
         var builtVersion = -1
-        var builtGpus = -1
         var sessionPixels = 0
 
         var accumulated: View? = null
@@ -813,12 +787,10 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             val version = sceneVersion.get()
             // Rebuild the GPU copy when the objects changed (once edits pause) or the image outgrew it.
             val sceneStale = version != builtVersion && System.currentTimeMillis() - lastSceneEdit > REBUILD_DELAY_MS
-            val gpus = gpuVersion.get()
-            if (session == null || sceneStale || size.pixels > sessionPixels || gpus != builtGpus) {
+            if (session == null || sceneStale || size.pixels > sessionPixels) {
                 sessionPixels = maxOf(size.pixels, sceneResolution.pixels)
                 session = open(sessionPixels)
                 builtVersion = version
-                builtGpus = gpus
                 accumulated = null
                 // A new scene: nothing of the frame before carries over.
                 motionContinuing = false

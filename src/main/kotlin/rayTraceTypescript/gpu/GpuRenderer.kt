@@ -160,7 +160,7 @@ class GpuRenderer : Renderer {
             val devices = CudaContext.devices()
             val optixReason = rayTraceTypescript.gpu.optix.OptixApi.unavailabilityReason()
             if (devices.isEmpty() || optixReason != null) return null
-            val tracer = GpuChoice(GpuChoice.ONE).resolve(devices, optixReason).single().device
+            val tracer = GpuChoice.fromProperties().resolve(devices, optixReason).device
             val card = tracer.takeIf { canUpscale(it) } ?: devices.firstOrNull { canUpscale(it) } ?: return null
             return try {
                 OptixDenoiser(card, upscaling = true, temporal = true)
@@ -206,9 +206,9 @@ class GpuRenderer : Renderer {
                 if (!quiet) System.err.println("[gpu] no OptiX denoiser (${optixReason ?: "no CUDA device"}); rendering without denoising")
                 return null
             }
-            val tracer = GpuChoice(GpuChoice.ONE).resolve(devices, optixReason).single().device
+            val tracer = GpuChoice.fromProperties().resolve(devices, optixReason).device
             val card = System.getProperty("rt.denoiser.gpu")?.takeIf { it.isNotBlank() }?.let { named ->
-                GpuChoice(named, "cuda").resolve(devices, null).first().device
+                GpuChoice(named, "cuda").resolve(devices, null).device
             } ?: devices.firstOrNull { it.ordinal != tracer.ordinal } ?: tracer
             if (upscaling && !canUpscale(card)) {
                 // The enlarging model gives a broken image on a GTX 1070, with no error: take a card it works on.

@@ -41,7 +41,7 @@ import java.util.IdentityHashMap
 internal class OptixSession(initial: GpuScene, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
     private val cuda = CudaContext.create(device)
-    override val devices: List<String> = listOf(GpuPick(device, Engine.OPTIX).toString())
+    override val device: String = GpuPick(device, Engine.OPTIX).toString()
     override var seed: Long = GpuSession.initialSeed()
 
     /** The film frame's turn, for the flow guide. */
@@ -161,17 +161,6 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         staging.limit(into.size)
         CudaContext.check(cuMemcpyDtoH(staging, outputs[target]), "cuMemcpyDtoH")
         staging.get(into)
-    }
-
-    override fun clear(target: Int) {
-        cuda.makeCurrent()
-        // All bits zero is 0.0f.
-        CudaContext.check(cuMemsetD32(outputs[target], 0, maxPixels * 3L), "cuMemsetD32")
-    }
-
-    override fun prepare(mode: Int) {
-        cuda.makeCurrent()
-        pipeline(mode)
     }
 
     override fun close() {
