@@ -1,9 +1,9 @@
 // Puts a music track under a rendered film: the picture is copied as it is, the track is cut
 // to the film's length (from START seconds in), faded in and out and brought to Instagram's
 // loudness (-14 LUFS). Instagram then treats it as the Reel's original audio.
-// Taken over unchanged from StlViewer's publish-reel skill.
+// Taken over from StlViewer's publish-reel skill (last synced 2026-11-17).
 //
-//   node add-music.mjs <film.mp4> <music.(mp3|wav|m4a|...)> [out.mp4] [--start=S|auto] [--fade-out=S]
+//   node add-music.mjs <film.mp4> <music.(mp3|wav|m4a|...)> [out.mp4] [--start=S|auto] [--fade-in=S] [--fade-out=S]
 //
 // --start=auto picks the loudest stretch of the track as long as the film (skips quiet intros).
 //
@@ -18,7 +18,7 @@ if (!film || !music) {
   process.exit(1);
 }
 const out = outArg || film.replace(/\.mp4$/i, '') + '-music.mp4';
-const fadeOut = parseFloat(flags['fade-out'] || '1.5');
+const fadeOut = parseFloat(flags['fade-out'] || '1.5'), fadeIn = parseFloat(flags['fade-in'] || '0.4');   // a looping film: --fade-in=0.03 --fade-out=0.03
 
 const probe = (file, entry) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entry, '-of', 'default=nw=1:nk=1', file]).toString().trim();
 const duration = parseFloat(probe(film, 'format=duration'));
@@ -47,7 +47,7 @@ if (trackLength - start < duration) console.log(`note: the track has ${(trackLen
 
 const audio = [
   `atrim=start=${start}:duration=${duration}`, 'asetpts=PTS-STARTPTS',
-  'afade=t=in:st=0:d=0.4', `afade=t=out:st=${Math.max(0, duration - fadeOut)}:d=${fadeOut}`,
+  `afade=t=in:st=0:d=${fadeIn}`, `afade=t=out:st=${Math.max(0, duration - fadeOut)}:d=${fadeOut}`,
   'loudnorm=I=-14:TP=-1.5:LRA=11', 'aresample=48000',
 ].join(',');
 execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', film, '-i', music,

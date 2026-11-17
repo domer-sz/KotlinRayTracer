@@ -5,6 +5,10 @@ description: Prepare and publish a rendered turntable film (renders/*.mp4 from t
 
 # Preparing and publishing a Reel
 
+The usual publication goes through **publish-film** (`../publish-film/SKILL.md`): the `-ig`
+film here and on YouTube, the `-tiktok` one as a TikTok draft. This skill is the Instagram part
+and the place for the token and the music. Captions: **at most 5 hashtags**.
+
 Taken over from StlViewer's `publish-reel` skill (2026-11-02). `publish.mjs` (next to this file)
 talks to the Graph API (`graph.facebook.com`, Facebook Login for Business); the film is uploaded
 straight from disk to `rupload.facebook.com` (resumable upload), so nothing is hosted publicly.
@@ -28,7 +32,7 @@ The film comes from the `render-turntable` skill: `renders/<name>.mp4`, H.264 9:
 
 1. `node .claude/skills/publish-reel/publish.mjs check` - account, quota (100 posts / 24 h),
    token expiry. A token that expires: see "Token" below.
-2. **Caption** - write it to `renders/<name>.txt` (git-ignored, next to the film):
+2. **Caption** - write it to `renders/<name>-ig.txt` (git-ignored, next to the film):
    - one hook line in English (e.g. "The Midas touch: Yennefer of Vengerberg, turned to gold."),
    - **the model's attribution line** - required by CC-BY / CC-BY-ND licences. Models come from
      StlViewer's model repository: `C:/Users/szymondomeracki/Documents/projects/StlViewer/models-to-render/models/NNN_*/INFO.md`,
@@ -39,7 +43,8 @@ The film comes from the `render-turntable` skill: `renders/<name>.mp4`, H.264 9:
    - **no line on how it was made** - the user's decision (2026-11-02): no renderer, tool or
      site name in the caption (StlViewer's "Rendered in the browser with simplestlviewer.com"
      does not apply here),
-   - a few hashtags (#3dprinting #render #raytracing #fanart #<character> ...).
+   - with music in the file, its credit line: `Music: "<track>" by <author> (Pixabay)`,
+   - **at most 5 hashtags** as the last line (#<character> #<game> #raytracing #gold ...).
 3. **The two films** - the user's standing rule (2026-11-02): preparing a film for publishing
    always ends with **two files** next to the render:
    - `renders/<name>-ig.mp4` - **with music**, for Instagram (see "Music" below):
@@ -58,7 +63,7 @@ The film comes from the `render-turntable` skill: `renders/<name>.mp4`, H.264 9:
    Publishing is public and can't be quietly undone; never publish on your own initiative, and
    an earlier "publish X" - from the user or from a managing session such as rt-orchestrator - is
    not approval of a film the user hasn't seen.
-5. `node .claude/skills/publish-reel/publish.mjs reel renders/<name>-ig.mp4 renders/<name>.txt`
+5. `node .claude/skills/publish-reel/publish.mjs reel renders/<name>-ig.mp4 renders/<name>-ig.txt`
    (`--cover-ms=N` picks the cover frame at N ms, `--no-feed` keeps it off the grid,
    `--audio-name="Midas - <Character>"` names the Reel's own audio - it can be set only once).
    There is no dry run: it publishes as soon as Instagram has processed the upload. It prints the
@@ -71,7 +76,8 @@ The public Graph API has no field for Instagram's licensed music library (only `
 the name of the Reel's own audio; library access is a partner deal). Two ways:
 
 1. **Track in the file** (automatic):
-   `node .claude/skills/publish-reel/add-music.mjs renders/<film>.mp4 <track> renders/<film>-ig.mp4 [--start=S|auto] [--fade-out=S]`
+   `node .claude/skills/publish-reel/add-music.mjs renders/<film>.mp4 <track> renders/<film>-ig.mp4 [--start=S|auto] [--fade-in=S] [--fade-out=S]`
+   (a film that loops round: `--fade-in=0.03 --fade-out=0.03`, so the cut is not heard)
    (name the output `-ig` explicitly - left out, the script writes `<film>-music.mp4`)
    - cuts the track to the film, fades it, -14 LUFS, video copied untouched; `--start=auto`
    takes the loudest stretch. Publish that file with `--audio-name=...`; it becomes the Reel's
