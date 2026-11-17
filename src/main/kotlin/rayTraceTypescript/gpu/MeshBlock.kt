@@ -42,6 +42,8 @@ class MeshBlock(val mesh: Mesh) {
     internal val faceMaterials: IntArray? get() = tree.faceMaterials
     /** The normals at each triangle's corners (9 floats a triangle), in leaf order; null for a flat mesh. */
     internal val cornerNormals: FloatArray? get() = tree.cornerNormals
+    /** The texture coordinates at each triangle's corners (6 floats a triangle), in leaf order; null when the file gave none. */
+    internal val cornerUvs: FloatArray? get() = tree.cornerUvs
 
     /** The mesh's triangles and SAH tree as the CUDA kernel reads them. */
     private class Tree(mesh: Mesh) {
@@ -52,6 +54,7 @@ class MeshBlock(val mesh: Mesh) {
         val maxDepth: Int
         val faceMaterials: IntArray?
         val cornerNormals: FloatArray?
+        val cornerUvs: FloatArray?
 
         init {
             val triangleCount = mesh.triangleCount
@@ -84,17 +87,21 @@ class MeshBlock(val mesh: Mesh) {
             val orderedMaterials = sourceMaterials?.let { IntArray(it.size) }
             val sourceNormals = if (mesh.smooth) mesh.smoothNormals else null
             val orderedNormals = sourceNormals?.let { FloatArray(it.size) }
+            val sourceUvs = mesh.uvs
+            val orderedUvs = sourceUvs?.let { FloatArray(it.size) }
             for (i in treeRefs.indices step 2) {
                 val old = treeRefs[i + 1]
                 val next = i / 2
                 System.arraycopy(source, old * stride, ordered, next * stride, stride)
                 if (orderedMaterials != null) orderedMaterials[next] = sourceMaterials[old]
                 if (orderedNormals != null) System.arraycopy(sourceNormals, old * Mesh.VERTEX_FLOATS, orderedNormals, next * Mesh.VERTEX_FLOATS, Mesh.VERTEX_FLOATS)
+                if (orderedUvs != null) System.arraycopy(sourceUvs, old * Mesh.UV_FLOATS, orderedUvs, next * Mesh.UV_FLOATS, Mesh.UV_FLOATS)
                 treeRefs[i + 1] = next
             }
             triangles = ordered
             faceMaterials = orderedMaterials
             cornerNormals = orderedNormals
+            cornerUvs = orderedUvs
             nodes = builder.nodes.toArray()
             leaves = builder.leaves.toArray()
             refs = treeRefs
@@ -134,6 +141,60 @@ class PlacedMesh(
 
     override fun hit(ray: Ray, rayT: Interval): Hit? = cpu.hit(ray, rayT)
 
+    /**
+     * How far along [ray] it is to the nearest triangle (both sides count), or null on a miss -
+     * what a mouse click asks. Each triangle is tried in turn in the block's own space instead of
+     * through [hit], whose tree over the moved mesh takes seconds to build for a large model: one
+     * pick through Yennefer's 717 592 triangles takes a few milliseconds.
+     */
+    fun pick(ray: Ray, limit: Float = Float.POSITIVE_INFINITY): Float? {
+        if (!box.hit(ray, Interval(PICK_EPSILON, limit))) return null
+        // Into the block's space: less the offset, over the scale, turned back. Origin and
+        // direction are scaled alike, so a distance along the ray is the same in both spaces.
+        val px = (ray.origin.x - offset.x) / scale
+        val py = (ray.origin.y - offset.y) / scale
+        val pz = (ray.origin.z - offset.z) / scale
+        val ox = cos * px - sin * pz
+        val oz = sin * px + cos * pz
+        val dx = (cos * ray.direction.x - sin * ray.direction.z) / scale
+        val dy = ray.direction.y / scale
+        val dz = (sin * ray.direction.x + cos * ray.direction.z) / scale
+
+        val v = block.mesh.vertices
+        var nearest = limit
+        var found = false
+        var i = 0
+        while (i < v.size) {
+            // Moller-Trumbore, as Triangle does it.
+            val e1x = v[i + 3] - v[i]; val e1y = v[i + 4] - v[i + 1]; val e1z = v[i + 5] - v[i + 2]
+            val e2x = v[i + 6] - v[i]; val e2y = v[i + 7] - v[i + 1]; val e2z = v[i + 8] - v[i + 2]
+            val hx = dy * e2z - dz * e2y
+            val hy = dz * e2x - dx * e2z
+            val hz = dx * e2y - dy * e2x
+            val det = e1x * hx + e1y * hy + e1z * hz
+            if (det > 1e-12f || det < -1e-12f) {
+                val inv = 1f / det
+                val sx = ox - v[i]; val sy = py - v[i + 1]; val sz = oz - v[i + 2]
+                val u = (sx * hx + sy * hy + sz * hz) * inv
+                if (u in 0f..1f) {
+                    val qx = sy * e1z - sz * e1y
+                    val qy = sz * e1x - sx * e1z
+                    val qz = sx * e1y - sy * e1x
+                    val w = (dx * qx + dy * qy + dz * qz) * inv
+                    if (w >= 0f && u + w <= 1f) {
+                        val t = (e2x * qx + e2y * qy + e2z * qz) * inv
+                        if (t > PICK_EPSILON && t < nearest) {
+                            nearest = t
+                            found = true
+                        }
+                    }
+                }
+            }
+            i += Mesh.VERTEX_FLOATS
+        }
+        return if (found) nearest else null
+    }
+
     /** The moved block's box, from its own box's turned corners - lists ask for it eagerly. */
     private val box: Aabb = run {
         val b = block.bounds
@@ -152,4 +213,8 @@ class PlacedMesh(
     }
 
     override fun aabbBoundingBox(): Aabb = box
+
+    private companion object {
+        const val PICK_EPSILON = 0.001f
+    }
 }

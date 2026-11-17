@@ -7,8 +7,8 @@ description: Render a ray traced turntable film (MP4) of a model with KoltinRayT
 
 The film comes from the renderer itself: `-Drt.turntable=<file.mp4>` on any scene turns the
 scene's objects (its parts that are neither lights nor walls) about the middle of their
-footprint, one frame per step, denoises each frame with OptiX (traced at half size and enlarged by the denoiser on the RTX
-2060 by default; at full size, `-Drt.upscale=off`, the GTX 1070 denoises) and pipes it to ffmpeg. What the
+footprint, one frame per step, denoises each frame with OptiX (traced at half size and enlarged by the denoiser, on the same RTX
+2060 that traces; one card does both, a GTX 1070 is not used) and pipes it to ffmpeg. What the
 code does and why: `AGENTS.md`, section *Turntable Films*.
 
 ## Before starting
@@ -17,7 +17,7 @@ code does and why: `AGENTS.md`, section *Turntable Films*.
   `native/cuda/windows-x64`, so run from the repository root (or point `-Drt.nvrtc=<dir>` at it).
   "GPU rendering unavailable" or "NVRTC not found" means one of those is missing - there is no
   CPU or OpenCL fallback any more.
-- **The GPU is exclusive.** A film keeps the GTX 1070 busy for ~24 min. If the StlViewer session
+- **The GPU is exclusive.** A film keeps the card busy for a few minutes (the GTX 1070 is not used any more). If the StlViewer session
   (`stl-viewer` in ListAgents) may be rendering, tell it before you start and send "GPU wolne"
   when done; two renders at once spoil both timings and risk a driver reset (TDR).
 - **ffmpeg** must run: `ffmpeg -version` (scoop: `~/scoop/shims/ffmpeg.exe`). Elsewhere point
@@ -140,7 +140,13 @@ exposure -0.4 EV) differed from it only in smooth normals and the cap at 16; bot
 that day, and a denoised still at angle 0 now sits 31.8 dB / SSIM 0.914 from v4's frame 0
 (25.3 / 0.884 flat).
 
-## Measured (RTX 2060 + GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
+## Measured on the RTX 2060 alone (2026-11-17, one card traces and denoises; Yennefer, 1080x1920, 450 frames)
+
+- Default film, 64 spp, upscaled: **0.16 s a frame**, ~72 s for the film (trace 134 ms, guides 19, denoising 94 beside it).
+- `-Drt.samples=16 -Drt.temporal=on`: **0.09 s a frame**, ~41 s (trace 43 ms, guides 35, temporal denoising 73 beside it).
+- A 1024-spp still with the OpenGL keep-awake window and without it: 14.3 s and 13.9-14.0 s - no difference; the viewer's quick look (bursty load) idles the RTX 2060 at 420-690 MHz (P3) with or without it.
+
+## Measured earlier (RTX 2060 + GTX 1070, Yennefer 717 592 triangles, 1080x1920, 64 spp)
 
 - 2026-11-15, driver 581.57, 30-frame film with the command's settings. The film prints where a
   frame's time goes at the end (`[film] a frame on average: ...`):
@@ -164,7 +170,7 @@ that day, and a denoised still at angle 0 now sits 31.8 dB / SSIM 0.914 from v4'
     `-Drt.upscale=off` renders at full size;
   - with Intel OIDN on the CPU, as all films before this day (removed 2026-11-17): 1.51 s a
     frame, of it 893 ms waiting for OIDN (1447 ms a frame);
-  - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.
+  - `-Drt.denoiser.gpu=2060` (the RTX does both; the only way now, the switch is gone): 0.56 s a frame.
 - The OptiX denoiser looks like OIDN, a touch sharper in folds and faces: against a 4096-spp still
   it scores 34.0 dB PSNR, OIDN 33.3 dB. Films published before 2026-11-15 were denoised by OIDN;
   a film that matches them takes a checkout of v1.1.0 or older with `-Drt.denoiser=oidn`.

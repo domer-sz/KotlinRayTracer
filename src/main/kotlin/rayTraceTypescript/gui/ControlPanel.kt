@@ -56,7 +56,7 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         toolTipText = "Ile razy promień może się odbić lub załamać, zanim ścieżka się urwie. " +
             "Mniej: szybciej, ciemniej w zakamarkach i w szkle; więcej: pełniejsze światło odbite."
     }
-    /** The card tracing and its engine, and what denoises (-Drt.gpu, -Drt.backend, -Drt.denoiser.gpu). */
+    /** The card tracing and denoising, and its engine (-Drt.gpu, -Drt.backend). */
     private val gpusInUse = JLabel(viewer.gpusInUse.ifEmpty { " " }).apply {
         font = Theme.font(11.5f)
         foreground = Theme.muted
@@ -233,7 +233,7 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         full(zUp)
         full(info)
         if (viewer.builtIns.any { !it.part.isLight }) full(restore)
-        full(JLabel("<html>Ctrl + przeciąganie przestawia zaznaczony obiekt, strzałki go przesuwają, Q / E obracają.</html>").apply {
+        full(JLabel("<html>Klik w obiekt zaznacza go, Ctrl + przeciąganie przestawia zaznaczony, strzałki go przesuwają, Q / E obracają.</html>").apply {
             font = Theme.font(11.5f)
             foreground = Theme.muted
         })
@@ -411,7 +411,7 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         }
     }
 
-    /** Shows which card traces and with what, and what denoises, e.g. "RTX 2060 (OptiX) · odszumia OptiX (GTX 1070)". */
+    /** Shows which card traces and with what, and what denoises, e.g. "RTX 2060 (OptiX) · odszumia OptiX". */
     fun showGpus(inUse: String) {
         gpusInUse.text = inUse
     }

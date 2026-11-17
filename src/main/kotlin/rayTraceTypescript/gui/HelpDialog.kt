@@ -22,6 +22,7 @@ object HelpDialog {
             "R" to "Powrót do widoku startowego"
         ),
         "Obiekty" to listOf(
+            "Klik w obiekt" to "Zaznacz go (dodany model albo obiekt sceny); zaznaczony ma przerywany zarys, a lista w panelu go pokazuje. Klik w puste miejsce odznacza",
             "Ctrl + przeciąganie (lub klik)" to "Przestaw zaznaczony obiekt (dodany albo kolumnę, kulę sceny); żółty zarys pokazuje, gdzie stanie: na podłodze, kolumnie, kuli, innym modelu, przy ścianie u jej stóp",
             "Strzałki" to "Przesuń zaznaczony obiekt - także kolumnę lub kulę sceny - w lewo, w prawo, dalej, bliżej (względem kamery)",
             "PageUp / PageDown" to "Podnieś / opuść zaznaczony model",

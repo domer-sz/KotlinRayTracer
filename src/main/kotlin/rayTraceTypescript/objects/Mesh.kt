@@ -25,13 +25,19 @@ class Mesh(
     /** The materials the file names (an OBJ's .mtl), in the order [faceMaterials] counts them. */
     val palette: List<MeshMaterial> = emptyList(),
     /** Whether to shade it smooth, from [smoothNormals]. */
-    val smooth: Boolean = false
+    val smooth: Boolean = false,
+    /**
+     * Texture coordinates at each facet's three corners (6 floats a triangle: u, v of each), when
+     * the file gave them (an OBJ's `vt`); NaN in a triangle's first value marks one without.
+     */
+    val uvs: FloatArray? = null
 ) {
 
     init {
         require(vertices.isNotEmpty()) { "Mesh has no triangles" }
         require(vertices.size % VERTEX_FLOATS == 0) { "Expected $VERTEX_FLOATS floats per triangle" }
         require(faceMaterials == null || faceMaterials.size == vertices.size / VERTEX_FLOATS) { "One material per triangle" }
+        require(uvs == null || uvs.size == vertices.size / VERTEX_FLOATS * UV_FLOATS) { "Six texture coordinates per triangle" }
     }
 
     val triangleCount: Int get() = vertices.size / VERTEX_FLOATS
@@ -40,7 +46,7 @@ class Mesh(
     val hasColours: Boolean get() = faceMaterials != null && palette.isNotEmpty()
 
     /** The same mesh, shaded smooth or flat. */
-    fun smoothed(on: Boolean = true): Mesh = if (on == smooth) this else Mesh(vertices, faceMaterials, palette, on)
+    fun smoothed(on: Boolean = true): Mesh = if (on == smooth) this else Mesh(vertices, faceMaterials, palette, on, uvs)
 
     /**
      * A normal at each corner of each facet, 9 floats a triangle like [vertices], for smooth
@@ -91,7 +97,7 @@ class Mesh(
             moved[i + 2] = (vertices[i + 2] - pivot.z) * scale + target.z
             i += 3
         }
-        return Mesh(moved, faceMaterials, palette, smooth)
+        return Mesh(moved, faceMaterials, palette, smooth, uvs)
     }
 
     /**
@@ -118,7 +124,7 @@ class Mesh(
             moved[i] = out[0]; moved[i + 1] = out[1]; moved[i + 2] = out[2]
             i += 3
         }
-        return Mesh(moved, faceMaterials, palette, smooth)
+        return Mesh(moved, faceMaterials, palette, smooth, uvs)
     }
 
     /** Every triangle made of [material]. */
@@ -210,5 +216,8 @@ class Mesh(
 
         /** Three vertices of x/y/z per triangle. */
         const val VERTEX_FLOATS = 9
+
+        /** Three corners of u/v per triangle, see [uvs]. */
+        const val UV_FLOATS = 6
     }
 }

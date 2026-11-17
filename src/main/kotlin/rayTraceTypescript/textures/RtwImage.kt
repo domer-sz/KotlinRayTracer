@@ -65,8 +65,21 @@ class RtwImage() : AutoCloseable {
     /** Raw 8-bit RGB scanlines (RGBRGB...), or null when no image is loaded. */
     internal fun rgbBytes(): ByteArray? = bdata
 
-    fun width(): Int = if (fdata == null) 0 else imageWidth
-    fun height(): Int = if (fdata == null) 0 else imageHeight
+    /** The mean of the pixels, linear like them; null when nothing is loaded. */
+    fun averageColour(): rayTraceTypescript.Color? {
+        val data = bdata ?: return null
+        var r = 0L; var g = 0L; var b = 0L
+        var i = 0
+        while (i < data.size) {
+            r += data[i].toInt() and 0xFF; g += data[i + 1].toInt() and 0xFF; b += data[i + 2].toInt() and 0xFF
+            i += 3
+        }
+        val n = (data.size / 3).coerceAtLeast(1) * 255f
+        return rayTraceTypescript.Color(r / n, g / n, b / n)
+    }
+
+    fun width(): Int = if (bdata == null) 0 else imageWidth
+    fun height(): Int = if (bdata == null) 0 else imageHeight
 
     /**
      * Returns 3 RGB channel values for pixel at (x, y).
@@ -93,7 +106,13 @@ class RtwImage() : AutoCloseable {
      * Note: Uses ImageIO (PNG/JPG/BMP/GIF depending on JVM plugins).
      * HDR formats are generally not supported by default ImageIO.
      */
-    fun load(filename: String): Boolean {
+    fun load(filename: String): Boolean = load(filename, data = false)
+
+    /**
+     * Loads like [load]; with [data] the bytes are kept as they are instead of decoded from sRGB -
+     * a roughness map is numbers, not colours.
+     */
+    fun load(filename: String, data: Boolean): Boolean {
         val file = File(filename)
         if (!file.exists() || !file.isFile) return false
 
@@ -124,14 +143,17 @@ class RtwImage() : AutoCloseable {
             val bSrgb = b8 / 255.0f
 
             // Store linear RGB floats [0,1]
-            floats[j++] = srgbToLinear(rSrgb)
-            floats[j++] = srgbToLinear(gSrgb)
-            floats[j++] = srgbToLinear(bSrgb)
+            floats[j++] = if (data) rSrgb else srgbToLinear(rSrgb)
+            floats[j++] = if (data) gSrgb else srgbToLinear(gSrgb)
+            floats[j++] = if (data) bSrgb else srgbToLinear(bSrgb)
         }
 
         fdata = floats
         bytesPerScanline = imageWidth * bytesPerPixel
         convertToBytes()
+        // Only the bytes are read from here on; a model with a hundred textures would otherwise
+        // keep four times their size in floats as well.
+        fdata = null
         return true
     }
 

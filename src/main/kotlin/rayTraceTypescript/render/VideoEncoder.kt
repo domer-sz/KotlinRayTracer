@@ -33,15 +33,12 @@ class VideoEncoder private constructor(
 
     /**
      * Appends one frame of linear colour (3 floats per pixel, rows top to bottom), with the same
-     * sqrt gamma and clamp as the PPM and PNG files.
+     * tone mapping as the PPM and PNG files ([ToneMap]).
      */
     fun write(linear: FloatArray) {
         require(linear.size == frame.size) { "frame of ${linear.size / 3} pixels, film is ${width}x$height" }
-        for (i in frame.indices) {
-            val value = linear[i]
-            val gamma = if (value > 0f) sqrt(value).coerceAtMost(0.999f) else 0f
-            frame[i] = (256f * gamma).toInt().toByte()
-        }
+        val tone = ToneMap.current()
+        for (i in frame.indices) frame[i] = tone.byte(linear[i]).toByte()
         try {
             input.write(frame)
         } catch (e: IOException) {

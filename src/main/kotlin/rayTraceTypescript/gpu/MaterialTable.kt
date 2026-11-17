@@ -39,37 +39,32 @@ internal class MaterialTable {
     /** The index of [material], writing it out first if it is new. */
     fun register(material: Material): Int = materialIndices.getOrPut(material) {
         val index = materialInts.size / SceneBuffers.MATERIAL_INT_STRIDE
+        // Four ints a material - its kind, its colour's texture, a texture of light it gives off on
+        // top (-1 for none) and one of its roughness (-1 for none) - and four floats: the metal's
+        // fuzz, glass's refractive index or the metal's Fresnel switch, how bright that light is, unused.
+        // The fourth float is a normal map's texture plus one, 0 for none.
+        fun entry(
+            kind: Int, texture: Int, first: Float = 0f, second: Float = 0f,
+            glow: Texture? = null, glowScale: Float = 0f, roughness: Texture? = null, normalMap: Texture? = null
+        ) {
+            materialInts.add(kind); materialInts.add(texture)
+            materialInts.add(glow?.let { registerTexture(it) } ?: -1); materialInts.add(roughness?.let { registerTexture(it) } ?: -1)
+            materialFloats.add(first); materialFloats.add(second); materialFloats.add(glowScale)
+            materialFloats.add(normalMap?.let { registerTexture(it) + 1f } ?: 0f)
+        }
         when (material) {
-            is Lambertian -> {
-                materialInts.add(0)
-                materialInts.add(registerTexture(material.texture))
-                materialFloats.add(0.0f)
-                materialFloats.add(0.0f)
-            }
-            is Metal -> {
-                materialInts.add(1)
-                materialInts.add(registerColor(material.albedo))
-                materialFloats.add(material.fuzz)
-                materialFloats.add(0.0f)
-            }
-            is DiffuseLight -> {
-                materialInts.add(3)
-                materialInts.add(registerTexture(material.texture))
-                materialFloats.add(0.0f)
-                materialFloats.add(0.0f)
-            }
-            is Isotropic -> {
-                materialInts.add(4)
-                materialInts.add(registerTexture(material.texture))
-                materialFloats.add(0.0f)
-                materialFloats.add(0.0f)
-            }
-            is Dielectric -> {
-                materialInts.add(2)
-                materialInts.add(0)
-                materialFloats.add(0.0f)
-                materialFloats.add(material.ri)
-            }
+            is Lambertian -> entry(0, registerTexture(material.texture), glow = material.glow, glowScale = material.glowScale, normalMap = material.normalMap)
+            // The second float, unused by the book's metal, switches its Fresnel term on.
+            is Metal -> entry(
+                1, material.texture?.let { registerTexture(it) } ?: registerColor(material.albedo),
+                material.fuzz, if (material.fresnel) 1.0f else 0.0f, material.glow, material.glowScale, material.roughness, material.normalMap
+            )
+            is DiffuseLight -> entry(3, registerTexture(material.texture))
+            is Isotropic -> entry(4, registerTexture(material.texture))
+            // Glass: its tint's colour and, in the first float, the distance through it that leaves
+            // that colour (0 for clear glass, whose texture slot is then unused).
+            is Dielectric -> material.tint?.let { entry(2, registerColor(it), material.tintDistance, material.ri) }
+                ?: entry(2, 0, 0f, material.ri)
             else -> throw IllegalArgumentException("Unsupported material for GPU rendering: ${material::class.java.name}")
         }
         index

@@ -36,6 +36,20 @@ internal class MeshBuilder(expectedTriangles: Int = 128) {
     /** The palette entry the next triangles are made of; -1 while the file has named none. */
     var material: Int = -1
 
+    /** Each triangle's corner texture coordinates, once the file gave any (see [Mesh.uvs]). */
+    private var uvData: FloatList? = null
+
+    /** The corners' texture coordinates of the triangle just added, or none for it. */
+    private fun cornerUvs(uvs: FloatArray?) {
+        if (uvs == null && uvData == null) return
+        val list = uvData ?: FloatList((triangleCount + 1024) * Mesh.UV_FLOATS).also { fresh ->
+            // The triangles before the first that had coordinates: none.
+            repeat((triangleCount - 1) * Mesh.UV_FLOATS) { fresh.add(Float.NaN) }
+            uvData = fresh
+        }
+        if (uvs == null) repeat(Mesh.UV_FLOATS) { list.add(Float.NaN) } else uvs.forEach { list.add(it) }
+    }
+
     fun triangle(
         ax: Float, ay: Float, az: Float,
         bx: Float, by: Float, bz: Float,
@@ -56,8 +70,10 @@ internal class MeshBuilder(expectedTriangles: Int = 128) {
      * corners are triangulated as a fan, which is what every format here assumes for the convex
      * polygons it allows.
      */
-    fun polygon(positions: FloatList, indices: IntArray) {
+    fun polygon(positions: FloatList, indices: IntArray, texCoords: FloatList? = null, uvIndices: IntArray? = null) {
         if (indices.size < 3) return
+        // Texture coordinates only when every corner names a valid one.
+        val uvs = uvIndices?.takeIf { texCoords != null && it.size == indices.size && it.all { i -> i >= 0 && i * 2 + 1 < texCoords.size } }
         for (corner in 1 until indices.size - 1) {
             val a = indices[0] * 3
             val b = indices[corner] * 3
@@ -68,6 +84,14 @@ internal class MeshBuilder(expectedTriangles: Int = 128) {
                 positions[b], positions[b + 1], positions[b + 2],
                 positions[c], positions[c + 1], positions[c + 2]
             )
+            cornerUvs(uvs?.let { u ->
+                val t = texCoords!!
+                floatArrayOf(
+                    t[u[0] * 2], t[u[0] * 2 + 1],
+                    t[u[corner] * 2], t[u[corner] * 2 + 1],
+                    t[u[corner + 1] * 2], t[u[corner + 1] * 2 + 1]
+                )
+            })
         }
     }
 
@@ -76,11 +100,12 @@ internal class MeshBuilder(expectedTriangles: Int = 128) {
      * material, and faces naming one the palette lacks, get entry 0.
      */
     fun build(palette: List<MeshMaterial> = emptyList()): Mesh {
-        if (palette.isEmpty() || faceMaterials.isEmpty()) return Mesh(data.toFloatArray())
+        val uvs = uvData?.toFloatArray()
+        if (palette.isEmpty() || faceMaterials.isEmpty()) return Mesh(data.toFloatArray(), uvs = uvs)
         val faces = IntArray(triangleCount) { i ->
             val m = if (i < faceMaterials.size) faceMaterials[i] else 0
             if (m in palette.indices) m else 0
         }
-        return Mesh(data.toFloatArray(), faces, palette)
+        return Mesh(data.toFloatArray(), faces, palette, uvs = uvs)
     }
 }

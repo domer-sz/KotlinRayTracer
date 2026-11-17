@@ -8,7 +8,7 @@ i interaktywnym oknem podglądu.
 
 - **Windows x64** – kompilator kernela (NVRTC) i okno trzymające zegary GPU są przygotowane tylko
   pod Windows.
-- **Karta NVIDIA z CUDA** – testowane na GTX 1070 (Pascal, sm_61) ze sterownikiem 577. Kompilator
+- **Karta NVIDIA z CUDA** – testowane na RTX 2060 (Turing, sm_75); karta bez rdzeni RT też działa, jądrem CUDA (GTX 1070, sm_61). Kompilator
   kernela (NVRTC) jest w `native/cuda`, więc CUDA Toolkit nie jest potrzebny. Bez karty NVIDIA renderer
   nie działa (nie ma już trybu CPU ani OpenCL).
 - **JDK 17 lub nowszy** (testowane na Temurin 21) i **Maven**.

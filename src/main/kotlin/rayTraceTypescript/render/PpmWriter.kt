@@ -12,19 +12,19 @@ import javax.imageio.ImageIO
 /**
  * Linear RGB samples -> ASCII PPM, plus the same pixels as a PNG beside it (see [pngPath]):
  * the PPM is the project's reference format, the PNG a sixth of the size and viewable anywhere.
- * Quantization goes through [Color] once for both, so the CPU and GPU backends share one
- * gamma/clamp/rounding path and the two files always hold identical pixels.
+ * Quantization goes through [ToneMap] once for both, as the viewer and films do, so the two files
+ * always hold identical pixels.
  */
 object PpmWriter {
     fun write(outputPath: Path, width: Int, height: Int, linearRgb: FloatArray) {
         require(linearRgb.size == width * height * 3) { "Expected ${width * height * 3} samples, got ${linearRgb.size}" }
         val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
         val sb = StringBuilder("P3\n${width} ${height}\n255\n")
+        val tone = ToneMap.current()
         for (pixel in 0 until width * height) {
-            val color = Color(linearRgb[pixel * 3], linearRgb[pixel * 3 + 1], linearRgb[pixel * 3 + 2])
-            val r = color.colorR()
-            val g = color.colorG()
-            val b = color.colorB()
+            val r = tone.byte(linearRgb[pixel * 3])
+            val g = tone.byte(linearRgb[pixel * 3 + 1])
+            val b = tone.byte(linearRgb[pixel * 3 + 2])
             sb.append("$r $g $b\n")
             image.setRGB(pixel % width, pixel / width, (r shl 16) or (g shl 8) or b)
         }

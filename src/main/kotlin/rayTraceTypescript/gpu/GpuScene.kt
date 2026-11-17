@@ -91,7 +91,9 @@ class InstancedScene internal constructor(
             quads = sceneQuads.isNotEmpty() || SceneBuffers.LEAF_QUAD in boundaries,
             media = mediumCount > 0,
             sphereData = spheres, lights = lightCount > 0, materialInts = materialInts, textureInts = textureInts,
-            smooth = triangleNormals.isNotEmpty() || instances.any { it.block.mesh.smooth }
+            smooth = triangleNormals.isNotEmpty() || instances.any { it.block.mesh.smooth },
+            // Only placed meshes carry texture coordinates; the loose triangles never do.
+            uvs = instances.any { it.block.mesh.uvs != null }, materialFloats = materialFloats
         )
     }
 

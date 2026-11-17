@@ -21,6 +21,7 @@ import java.nio.FloatBuffer
 internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
     private val cuda = CudaContext.create(device)
+    private val environment = EnvironmentOnCard()
     override val device: String = GpuPick(device, Engine.CUDA).toString()
     /** Device memory the session keeps: the camera and the outputs. */
     private val buffers = mutableListOf<Long>()
@@ -36,6 +37,9 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
     /** The feature switches the kernels were built with, and whether volumes need more registers. */
     private var defines = initialScene.kernelDefines()
     private var hasMedia = initialScene.mediumCount > 0
+    /** Caustics by photon mapping (-Drt.caustics), and whether the scene has casters and lights for them. */
+    private val caustics: CausticMap? = if (CausticMap.enabled) CausticMap(cuda).also { it.prepare(initial.instanced) } else null
+    private var causticsOn = caustics?.active == true
 
     private val cameraBuffer: Long
     private var sceneArguments: List<Long> = emptyList()
@@ -56,7 +60,10 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         }
     }
 
-    override fun replaceScene(next: GpuScene) = replaceScene(next.buffers)
+    override fun replaceScene(next: GpuScene) {
+        caustics?.prepare(next.instanced)
+        replaceScene(next.buffers)
+    }
 
     private fun replaceScene(next: SceneBuffers) {
         cuda.makeCurrent()
@@ -67,10 +74,12 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         sceneArguments = upload(next)
         val nextDefines = next.kernelDefines()
         val nextMedia = next.mediumCount > 0
-        if (nextDefines != defines || nextMedia != hasMedia) {
+        val nextCaustics = caustics?.active == true
+        if (nextDefines != defines || nextMedia != hasMedia || nextCaustics != causticsOn) {
             releaseKernels()
             defines = nextDefines
             hasMedia = nextMedia
+            causticsOn = nextCaustics
         }
     }
 
@@ -84,8 +93,22 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         CudaContext.check(cuMemcpyHtoD(cameraBuffer, staging), "cuMemcpyHtoD(camera)")
     }
 
+    override fun samplesPerLaunch(mode: Int, setup: CameraSetup): Int =
+        if (mode == GpuSession.MODE_IMAGE && causticsOn) caustics!!.samplesPerLaunch(setup) else Int.MAX_VALUE
+
     override fun launch(mode: Int, setup: CameraSetup, sampleStart: Int, count: Int, scale: Float, target: Int) {
         cuda.makeCurrent()
+        if (mode == GpuSession.MODE_IMAGE && causticsOn) {
+            // The launch's photon map first: shot, landed, sorted into the grid.
+            val photons = caustics!!.begin(setup, sampleStart, count)
+            run(GpuSession.MODE_PHOTONS, setup, photons, 1, sampleStart, count, scale, target)
+            caustics.buildGrid(photons)
+        }
+        run(mode, setup, setup.imageWidth, setup.imageHeight, sampleStart, count, scale, target)
+    }
+
+    /** One launch of [mode]'s kernel over a [width] x [height] "image": pixels, or photons in a row. */
+    private fun run(mode: Int, setup: CameraSetup, width: Int, height: Int, sampleStart: Int, count: Int, scale: Float, target: Int) {
         val function = kernel(mode)
         MemoryStack.stackPush().use { stack ->
             // cuLaunchKernel takes a pointer to each argument's value, in the kernel's order:
@@ -93,23 +116,34 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
             // The normal and flow guides follow the output; only the guides pass (GUIDES) writes them,
             // and the flow stays zeros here: this kernel does not know which hits turn.
             val pointers = sceneArguments + outputs[target] + outputs[GpuSession.NORMAL] + outputs[GpuSession.FLOW]
-            val params = stack.mallocPointer(pointers.size + 10)
+            val params = stack.mallocPointer(pointers.size + 16)
             pointers.forEachIndexed { i, buffer -> params.put(i, MemoryUtil.memAddress(stack.longs(buffer))) }
             var at = pointers.size
-            for (value in intArrayOf(setup.imageWidth, setup.imageHeight, sampleStart, count, setup.maxReflectionDepth)) {
+            for (value in intArrayOf(width, height, sampleStart, count, setup.maxReflectionDepth)) {
                 params.put(at++, MemoryUtil.memAddress(stack.ints(value)))
             }
             params.put(at++, MemoryUtil.memAddress(stack.floats(scale)))
             params.put(at++, MemoryUtil.memAddress(stack.ints(scene.rootNode)))
             params.put(at++, MemoryUtil.memAddress(stack.ints(scene.lightCount)))
             params.put(at++, MemoryUtil.memAddress(stack.longs(seed)))
-            params.put(at, MemoryUtil.memAddress(stack.floats(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f)))
+            params.put(at++, MemoryUtil.memAddress(stack.floats(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f)))
+            // The environment map last: its buffer (0 for none), size, brightness and turn.
+            val map = setup.environment
+            params.put(at++, MemoryUtil.memAddress(stack.longs(environment.bufferFor(map))))
+            params.put(at++, MemoryUtil.memAddress(stack.ints(map?.width ?: 0)))
+            params.put(at++, MemoryUtil.memAddress(stack.ints(map?.height ?: 0)))
+            params.put(at++, MemoryUtil.memAddress(stack.floats(map?.intensity ?: 0f)))
+            params.put(at++, MemoryUtil.memAddress(stack.floats(Math.toRadians((map?.turnDegrees ?: 0f).toDouble()).toFloat())))
+            // The photon map, for the photon pass and the image that gathers it; 0 otherwise.
+            params.put(at, MemoryUtil.memAddress(stack.longs(if (GpuSession.withCaustics(mode, causticsOn)) caustics!!.params else 0L)))
 
             // One thread per pixel, a warp of 32 covering an 8x4 tile: neighbouring rays stay
             // together on their first bounces, where they diverge least.
-            val tiles = ((setup.imageWidth + 7) / 8).toLong() * ((setup.imageHeight + 3) / 4)
+            val tiles = ((width + 7) / 8).toLong() * ((height + 3) / 4)
             val block = BLOCK_SIZE
-            val grid = ((tiles * 32 + block - 1) / block).toInt()
+            // The photon pass is a thread a photon, in a row.
+            val threads = if (mode == GpuSession.MODE_PHOTONS) width.toLong() else tiles * 32
+            val grid = ((threads + block - 1) / block).toInt()
             CudaContext.check(cuLaunchKernel(function, grid, 1, 1, block, 1, 1, 0, 0L, params, null), "cuLaunchKernel")
             CudaContext.check(cuCtxSynchronize(), "kernel (cuCtxSynchronize)")
         }
@@ -129,7 +163,10 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         // -Drt.cuda.options adds compiler flags for experiments, space separated.
         val extra = System.getProperty("rt.cuda.options")?.split(' ')?.filter { it.isNotBlank() } ?: emptyList()
         val options = BUILD_OPTIONS + defines.split(' ').filter { it.isNotBlank() } +
-            listOf("-DAOV_MODE=${GpuSession.aovMode(mode)}", "-DGUIDES=${if (GpuSession.gathersGuides(mode)) 1 else 0}") + registerCap(extra) + extra
+            listOf(
+                "-DAOV_MODE=${GpuSession.aovMode(mode)}", "-DGUIDES=${if (GpuSession.gathersGuides(mode)) 1 else 0}",
+                "-DCAUSTICS=${if (GpuSession.withCaustics(mode, causticsOn)) 1 else 0}"
+            ) + registerCap(extra) + extra
         val built = cuda.buildKernel(GpuRenderer.cudaKernelSource(), options)
         System.err.println(
             "[gpu] built the ${GpuSession.MODE_NAMES[mode]} kernel for ${cuda.deviceName} (sm_${cuda.computeCapability}) " +
@@ -156,11 +193,13 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         try {
             cuda.makeCurrent()
             releaseKernels()
+            caustics?.close()
             sceneMemory.forEach { cuMemFree(it) }
             buffers.forEach { cuMemFree(it) }
         } finally {
             stagingMemory.free()
             cuda.close()
+            environment.close()
             keepAwake?.close()
         }
     }
@@ -177,7 +216,7 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         copy(s.textureInts), copy(s.textureFloats),
         copy(s.textureImages),
         copy(s.perlinVectors), copy(s.perlinPermutations),
-        copy(s.triangleNormals)
+        copy(s.triangleNormals), copy(s.triangleUvs)
     )
 
     private fun allocate(bytes: Long): Long = MemoryStack.stackPush().use { stack ->

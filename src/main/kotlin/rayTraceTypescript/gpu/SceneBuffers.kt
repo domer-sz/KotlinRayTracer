@@ -51,7 +51,9 @@ class SceneBuffers(
     val perlinPermutations: IntArray,
     val rootNode: Int,
     val maxDepth: Int,
-    val triangleNormals: FloatArray = FloatArray(0)
+    val triangleNormals: FloatArray = FloatArray(0),
+    /** 6 floats per facet, in the same order: the texture coordinates at its corners, NaN first for one without; empty when no facet has any. */
+    val triangleUvs: FloatArray = FloatArray(0)
 ) {
     val nodeCount: Int get() = nodes.size / NODE_INTS
     val sphereCount: Int get() = sphereMaterials.size
@@ -69,7 +71,8 @@ class SceneBuffers(
         val kinds = refs.filterIndexed { i, _ -> i % 2 == 0 }.toSet()
         return defines(
             LEAF_SPHERE in kinds, LEAF_TRIANGLE in kinds, LEAF_QUAD in kinds, LEAF_MEDIUM in kinds,
-            spheres, lightCount > 0, materialInts, textureInts, smooth = triangleNormals.isNotEmpty()
+            spheres, lightCount > 0, materialInts, textureInts, smooth = triangleNormals.isNotEmpty(),
+            uvs = triangleUvs.isNotEmpty(), materialFloats = materialFloats
         )
     }
 
@@ -81,9 +84,13 @@ class SceneBuffers(
         internal fun defines(
             spheres: Boolean, triangles: Boolean, quads: Boolean, media: Boolean,
             sphereData: FloatArray, lights: Boolean, materialInts: IntArray, textureInts: IntArray,
-            smooth: Boolean
+            smooth: Boolean,
+            uvs: Boolean = false,
+            materialFloats: FloatArray = FloatArray(0)
         ): String {
             val materials = materialInts.filterIndexed { i, _ -> i % MATERIAL_INT_STRIDE == 0 }.toSet()
+            // A surface that glows from a texture needs the emission code as much as a lamp does.
+            val glows = (0 until materialInts.size / MATERIAL_INT_STRIDE).any { materialInts[it * MATERIAL_INT_STRIDE + 2] >= 0 }
             val textures = textureInts.filterIndexed { i, _ -> i % TEXTURE_INT_STRIDE == 0 }.toSet()
             val moving = (0 until sphereData.size / SPHERE_STRIDE).any { s ->
                 (3..5).any { sphereData[s * SPHERE_STRIDE + it] != 0.0f }
@@ -96,13 +103,16 @@ class SceneBuffers(
                 "HAS_MOTION" to moving,
                 "HAS_LIGHTS" to lights,
                 "HAS_SMOOTH" to smooth,
+                "HAS_UV" to uvs,
+                // Normal maps bend only textured triangles' normals.
+                "HAS_NORMALMAP" to (uvs && (0 until materialFloats.size / MATERIAL_FLOAT_STRIDE).any { materialFloats[it * MATERIAL_FLOAT_STRIDE + 3] > 0f }),
                 "TEX_CHECKER" to (1 in textures),
                 "TEX_IMAGE" to (2 in textures),
                 "TEX_NOISE" to (4 in textures),
                 "TEX_UVCHECKER" to (5 in textures),
                 "MAT_METAL" to (1 in materials),
                 "MAT_DIELECTRIC" to (2 in materials),
-                "MAT_EMISSIVE" to (3 in materials),
+                "MAT_EMISSIVE" to (3 in materials || glows),
                 "MAT_ISOTROPIC" to (4 in materials)
             )
             return features.entries.joinToString(" ") { (name, on) -> "-D$name=${if (on) 1 else 0}" }
@@ -114,8 +124,8 @@ class SceneBuffers(
         const val TRIANGLE_STRIDE = 12
         const val QUAD_STRIDE = 16
         const val MEDIUM_INT_STRIDE = 2
-        const val MATERIAL_INT_STRIDE = 2
-        const val MATERIAL_FLOAT_STRIDE = 2
+        const val MATERIAL_INT_STRIDE = 4
+        const val MATERIAL_FLOAT_STRIDE = 4
         const val TEXTURE_INT_STRIDE = 4
         const val TEXTURE_FLOAT_STRIDE = 4
 

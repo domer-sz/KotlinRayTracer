@@ -54,6 +54,12 @@ fun main() {
         return
     }
 
+    // -Drt.flythrough=film.mp4 renders the camera moving along -Drt.flythrough.path (see FlythroughRender).
+    System.getProperty("rt.flythrough")?.let { film ->
+        rayTraceTypescript.gpu.FlythroughRender.render(scene, java.nio.file.Paths.get(film))
+        return
+    }
+
     // -Drt.gui opens the scene in a window to steer the camera with the mouse; S there saves
     // beside where -Drt.out points.
     if (System.getProperty("rt.gui") != null) {

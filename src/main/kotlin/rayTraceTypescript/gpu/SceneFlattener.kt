@@ -31,6 +31,9 @@ class SceneFlattener private constructor() {
     /** 9 floats a triangle: its corners' normals for smooth shading, zeros for a flat facet. */
     private val triangleNormals = FloatBuffer()
     private var anySmooth = false
+    /** 6 floats a triangle: its corners' texture coordinates, NaN first for a triangle without. */
+    private val triangleUvs = FloatBuffer()
+    private var anyUvs = false
     private val quads = FloatBuffer()
     private val quadMaterials = IntBuffer()
     private val mediumInts = IntBuffer()
@@ -64,6 +67,7 @@ class SceneFlattener private constructor() {
             "Scene tree is ${bvh.maxDepth} levels deep, kernel stack holds ${SceneBuffers.MAX_TRAVERSAL_DEPTH}"
         }
         val (orderedTriangles, orderedTriangleMaterials, orderedNormals) = trianglesInLeafOrder()
+        val orderedUvs = uvsInLeafOrder
         return SceneBuffers(
             nodes = bvh.nodes.toArray(),
             leaves = bvh.leaves.toArray(),
@@ -73,6 +77,7 @@ class SceneFlattener private constructor() {
             triangles = orderedTriangles,
             triangleMaterials = orderedTriangleMaterials,
             triangleNormals = orderedNormals,
+            triangleUvs = orderedUvs,
             quads = quads.toArray(),
             quadMaterials = quadMaterials.toArray(),
             mediumInts = mediumInts.toArray(),
@@ -112,6 +117,7 @@ class SceneFlattener private constructor() {
                 triangles.addTriangle(triangle)
                 triangleMaterials.add(registerMaterial(triangle.material))
                 addCornerNormals(hittable.cornerNormals, transform)
+                repeat(6) { triangleUvs.add(Float.NaN) }
                 val box = triangle.aabbBoundingBox()
                 refs.add(SceneBuffers.LEAF_TRIANGLE, index, box.x.min, box.y.min, box.z.min, box.x.max, box.y.max, box.z.max)
             }
@@ -183,6 +189,14 @@ class SceneFlattener private constructor() {
                 triangleNormals.add(y)
                 triangleNormals.add(-s * x + c * z)
             }
+        }
+        // Texture coordinates go with the triangles as they are, whatever the placement.
+        val uvs = block.cornerUvs
+        if (uvs == null) {
+            repeat(block.triangleCount) { repeat(6) { k -> triangleUvs.add(if (k == 0) Float.NaN else 0.0f) } }
+        } else {
+            anyUvs = true
+            uvs.forEach { triangleUvs.add(it) }
         }
         val root = bvh.graft(placed, base)
         // Its box is what its root's two children cover, so the tree above holds them whole.
@@ -256,6 +270,8 @@ class SceneFlattener private constructor() {
         val ordered = FloatArray(source.size)
         val orderedMaterials = IntArray(sourceMaterials.size)
         val orderedNormals = FloatArray(sourceNormals?.size ?: 0)
+        val sourceUvs = if (anyUvs) triangleUvs.toArray() else null
+        val orderedUvs = FloatArray(sourceUvs?.size ?: 0)
         var next = 0
         val refs = bvh.refs
         for (i in 0 until refs.size step 2) {
@@ -266,12 +282,17 @@ class SceneFlattener private constructor() {
                 System.arraycopy(source, old * SceneBuffers.TRIANGLE_STRIDE, ordered, next * SceneBuffers.TRIANGLE_STRIDE, SceneBuffers.TRIANGLE_STRIDE)
                 orderedMaterials[next] = sourceMaterials[old]
                 if (sourceNormals != null) System.arraycopy(sourceNormals, old * 9, orderedNormals, next * 9, 9)
+                if (sourceUvs != null) System.arraycopy(sourceUvs, old * 6, orderedUvs, next * 6, 6)
                 next++
             }
             refs[i + 1] = remap[old]
         }
+        uvsInLeafOrder = orderedUvs
         return Triple(ordered, orderedMaterials, orderedNormals)
     }
+
+    /** The texture coordinates as [trianglesInLeafOrder] last ordered them; empty when no triangle has any. */
+    private var uvsInLeafOrder = FloatArray(0)
 
     /** A triangle's corner normals turned as [transform] turns it, or zeros for a flat facet. */
     private fun addCornerNormals(normals: FloatArray?, transform: Transform) {

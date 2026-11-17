@@ -55,6 +55,8 @@ internal class SwitchingSession(private val card: GpuDevice, scene: GpuScene, pr
     override fun launch(mode: Int, setup: CameraSetup, sampleStart: Int, count: Int, scale: Float, target: Int) =
         current.launch(mode, setup, sampleStart, count, scale, target)
 
+    override fun samplesPerLaunch(mode: Int, setup: CameraSetup): Int = current.samplesPerLaunch(mode, setup)
+
     override fun read(target: Int, into: FloatArray) = current.read(target, into)
 
     override fun close() = current.close()

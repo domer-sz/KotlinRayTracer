@@ -89,6 +89,12 @@ __device__ inline float3 xyz(float4 a) { return make_float3(a.x, a.y, a.z); }
 #ifndef HAS_SMOOTH
 #define HAS_SMOOTH 1
 #endif
+#ifndef HAS_UV
+#define HAS_UV 1
+#endif
+#ifndef HAS_NORMALMAP
+#define HAS_NORMALMAP 1
+#endif
 #ifndef TEX_CHECKER
 #define TEX_CHECKER 1
 #endif
@@ -126,6 +132,34 @@ __device__ inline float3 xyz(float4 a) { return make_float3(a.x, a.y, a.z); }
 #endif
 // With GUIDES, the albedo guide (AOV_MODE 1) writes the normal guide beside it from the same rays.
 #define GUIDES_ON (GUIDES && AOV_MODE == 1)
+
+// Photon mapping for caustics (-Drt.caustics): AOV_MODE 5 shoots the photons, one thread each,
+// from the lights through the casters to where they land; CAUSTICS in the image mode gathers them
+// at the first surface a camera path reaches that is not a caster, and the path tracer gives up
+// the light it would have found there through casters, so nothing is counted twice.
+#ifndef CAUSTICS
+#define CAUSTICS 0
+#endif
+// A metal smoother than this - its fuzz, GGX's alpha for a model file's metal - bends photons;
+// rougher ones are left to the path tracer, like everything that is not glass or such a metal.
+#define CAUSTIC_MAX_FUZZ 0.04f
+#define CAUSTIC_AIMS 8
+#define PHOTON_FLOATS 12
+
+// What a launch with caustics reads, written by gpu/CausticMap before each launch. Pointers first.
+typedef struct {
+    float* photons;              // a slot a photon: position, landed (1) or not (0); direction it came in, 0; flux, 0
+    const float* sorted;         // the landed photons, sorted by grid cell, in the same layout
+    const int* cellStart;        // tableSize + 1 entries: where each cell's run starts in sorted
+    const float* lightCdf;       // a light is shot from in proportion to the light it sends the casters' way
+    int photonCount;             // photons shot this launch
+    int tableSize;               // grid cells (hashed), a power of two
+    float cellSize;              // twice the radius: a gather disc touches at most 2 x 2 x 2 cells
+    float radius;                // of the gather disc, this launch
+    int aimCount;                // spheres round the casters the photons are aimed at
+    int padding;
+    float aim[CAUSTIC_AIMS * 4]; // centre and radius of each
+} CausticParams;
 
 // ---------------------------------------------------------------- random numbers
 
@@ -253,6 +287,10 @@ typedef struct {
     const int* __restrict__ mediumInts;
     const float* __restrict__ mediumFloats;
     const float* __restrict__ triangleNormals; // 9 per triangle: its corners' normals, zeros when flat
+    const float* __restrict__ triangleUvs;     // 6 per triangle: its corners' texture coordinates, NaN first when none; null in OptiX
+    const float* __restrict__ matF;            // for a normal map, found when the hit is finished
+    const int* __restrict__ texI;
+    const unsigned char* __restrict__ images;
 } Scene;
 
 // The closest hit found so far. Only what the search itself needs: normals, points and texture
@@ -277,6 +315,7 @@ struct Instance {
     const float* vertices;
     const int* faces;                    // each triangle's entry in the mesh's own palette, or null
     const float* normals;                // 9 per triangle, its corners' normals in the mesh's space; null when flat
+    const float* uvs;                    // 6 per triangle, its corners' texture coordinates; null when the file gave none
     int material;                        // the material of the mesh, and of a face not in the palette
     int palette;                         // where this instance's entries start in Params.palette
     int paletteCount;
@@ -317,6 +356,8 @@ struct Params {
     const int* sphereIds;                // the sphere each primitive of the spheres' tree stands for
     const Instance* instances;
     const int* palette;
+    const float* env;                    // the environment map, 3 floats a pixel, or null for the background
+    const CausticParams* caustic;        // with caustics, the photon map; null otherwise
     OptixTraversableHandle handle;
     unsigned long long seed;
     int width;
@@ -334,6 +375,10 @@ struct Params {
     float turnSin;                       // before, as an Instance turns (x' = c x + s z, z' = -s x + c z),
     float turnAxisX;                     // about the vertical line through (turnAxisX, turnAxisZ)
     float turnAxisZ;
+    int envWidth;
+    int envHeight;
+    float envScale;                      // what the map's values are multiplied by
+    float envTurn;                       // radians the map is turned about the vertical
 };
 
 extern "C" {
@@ -575,6 +620,64 @@ __device__ inline float3 smooth_normal(const float* n, float u, float v, float3 
     return (ls > 1e-6f && dot(s, outward) > 0.0f) ? s / ls : outward;
 }
 
+// A mesh's texture coordinates at the hit: its corners' blended by the barycentric [u], [v] as
+// smooth_normal blends normals, wrapped into [0, 1) since files tile textures past their edges.
+// A triangle without coordinates (NaN first) keeps the barycentric ones.
+__device__ inline void mesh_uv(const float* t, float u, float v, HitRecord* rec) {
+    if (isnan(t[0])) return;
+    float w = 1.0f - u - v;
+    float tu = t[0] * w + t[2] * u + t[4] * v;
+    float tv = t[1] * w + t[3] * u + t[5] * v;
+    rec->u = tu - floorf(tu);
+    rec->v = tv - floorf(tv);
+}
+
+// What a ray that escapes sees: the environment map when there is one - latitude-longitude, its
+// rows from straight up to straight down, turned [turn] radians about the vertical - else the
+// background colour, else the first book's sky gradient.
+__device__ inline float3 sky_colour(const float* env, int w, int h, float scale, float turn,
+                                    float3 direction, float3 background, bool flatBackground) {
+    float3 d = direction / length(direction);
+    if (env) {
+        float u = (atan2f(d.x, -d.z) + turn) * (0.5f / M_PI_F) + 0.5f;
+        u -= floorf(u);
+        float v = acosf(clamp(d.y, -1.0f, 1.0f)) * (1.0f / M_PI_F);
+        int i = min((int)(u * (float)w), w - 1);
+        int j = min((int)(v * (float)h), h - 1);
+        const float* p = env + (j * w + i) * 3;
+        return make_float3(p[0], p[1], p[2]) * scale;
+    }
+    if (flatBackground) return background;
+    float alpha = 0.5f * (d.y + 1.0f);
+    return make_float3(1.0f, 1.0f, 1.0f) * (1.0f - alpha) + make_float3(0.5f, 0.7f, 1.0f) * alpha;
+}
+
+// The directions a triangle's texture u and v grow in, from its edges [e1], [e2] and its corners'
+// coordinates [t]: what a normal map's red and green lean the normal towards. False without
+// coordinates, or when they do not span the triangle.
+__device__ inline bool uv_tangents(float3 e1, float3 e2, const float* t, float3* tu, float3* tv) {
+    if (isnan(t[0])) return false;
+    float du1 = t[2] - t[0], dv1 = t[3] - t[1], du2 = t[4] - t[0], dv2 = t[5] - t[1];
+    float det = du1 * dv2 - du2 * dv1;
+    if (fabsf(det) < 1e-12f) return false;
+    float r = 1.0f / det;
+    *tu = (e1 * dv2 - e2 * dv1) * r;
+    *tv = (e2 * du1 - e1 * du2) * r;
+    return true;
+}
+
+// One texel of an image texture as stored, 0..1 - for a normal map, whose bytes are data.
+__device__ inline float3 image_rgb(const int* texI, const unsigned char* images, int index, float u, float v) {
+    if (texI[index * 4] != 2) return make_float3(0.5f, 0.5f, 1.0f);
+    int offset = texI[index * 4 + 1];
+    int width = texI[index * 4 + 2];
+    int height = texI[index * 4 + 3];
+    int i = min(max((int)(clamp(u, 0.0f, 1.0f) * (float)width), 0), width - 1);
+    int j = min(max((int)((1.0f - clamp(v, 0.0f, 1.0f)) * (float)height), 0), height - 1);
+    int at = offset + (j * width + i) * 3;
+    return make_float3((float)images[at], (float)images[at + 1], (float)images[at + 2]) * (1.0f / 255.0f);
+}
+
 // Where [p] lands on the screen of a pinhole camera at [center] whose pixel (0, 0) is centred at
 // [pixel00] and whose pixels step by [du] and [dv]: (column, row), in pixels, fractions kept.
 __device__ inline float2 screen_position(float3 p, float3 center, float3 pixel00, float3 du, float3 dv) {
@@ -596,6 +699,10 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
     rec->v = best->v;
     float3 outwardNormal;
     float3 shading;
+    // The texture's u and v directions, for a normal map; only a textured triangle has them.
+    float3 tanU = make_float3(0.0f, 0.0f, 0.0f);
+    float3 tanV = make_float3(0.0f, 0.0f, 0.0f);
+    bool hasTangents = false;
 
     if (HAS_SPHERES && best->kind == LEAF_SPHERE) {
         const float* s = sc->spheres + best->index * 8;
@@ -611,6 +718,10 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
         outwardNormal = outwardNormal / length(outwardNormal);
         rec->material = sc->triangleMaterials[best->index];
         shading = HAS_SMOOTH ? smooth_normal(sc->triangleNormals + best->index * 9, best->u, best->v, outwardNormal) : outwardNormal;
+        if (HAS_UV && sc->triangleUvs) {
+            if (HAS_NORMALMAP) hasTangents = uv_tangents(xyz(t[1]), xyz(t[2]), sc->triangleUvs + best->index * 6, &tanU, &tanV);
+            mesh_uv(sc->triangleUvs + best->index * 6, best->u, best->v, rec);
+        }
     } else if (HAS_QUADS && best->kind == LEAF_QUAD) {
         const float* data = sc->quads + best->index * 16;
         outwardNormal = make_float3(data[12], data[13], data[14]);
@@ -627,6 +738,16 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
         float3 facet = cross(make_float3(v[3], v[4], v[5]) - v0, make_float3(v[6], v[7], v[8]) - v0);
         facet = facet / length(facet);
         float3 n = (HAS_SMOOTH && placed->normals) ? smooth_normal(placed->normals + best->index * 9, best->u, best->v, facet) : facet;
+        if (HAS_UV && placed->uvs) {
+            if (HAS_NORMALMAP && uv_tangents(make_float3(v[3], v[4], v[5]) - v0, make_float3(v[6], v[7], v[8]) - v0,
+                                             placed->uvs + best->index * 6, &tanU, &tanV)) {
+                // Turned as the placement turns the mesh, like its normals.
+                tanU = make_float3(placed->cosTurn * tanU.x + placed->sinTurn * tanU.z, tanU.y, -placed->sinTurn * tanU.x + placed->cosTurn * tanU.z);
+                tanV = make_float3(placed->cosTurn * tanV.x + placed->sinTurn * tanV.z, tanV.y, -placed->sinTurn * tanV.x + placed->cosTurn * tanV.z);
+                hasTangents = true;
+            }
+            mesh_uv(placed->uvs + best->index * 6, best->u, best->v, rec);
+        }
         outwardNormal = make_float3(placed->cosTurn * facet.x + placed->sinTurn * facet.z, facet.y,
                                     -placed->sinTurn * facet.x + placed->cosTurn * facet.z);
         shading = make_float3(placed->cosTurn * n.x + placed->sinTurn * n.z, n.y, -placed->sinTurn * n.x + placed->cosTurn * n.z);
@@ -655,6 +776,30 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
     rec->normal = rec->frontFace ? shading : -shading;
     // A shading normal turned away from the viewer would shade the back of the facet.
     if (dot(rec->normal, direction) > 0.0f) rec->normal = rec->gnormal;
+#if HAS_NORMALMAP
+    // A normal map (the material's fourth float, its texture plus one): red and green lean the
+    // normal along the texture's u and v, DirectX-style with green pointing down v; the blue is
+    // worked out from them, as two-channel maps leave it out.
+    int normalMap = hasTangents ? (int)sc->matF[rec->material * 4 + 3] - 1 : -1;
+    if (normalMap >= 0) {
+        float3 c = image_rgb(sc->texI, sc->images, normalMap, rec->u, rec->v);
+        float nx = c.x * 2.0f - 1.0f;
+        float ny = -(c.y * 2.0f - 1.0f);
+        float nz = sqrtf(fmaxf(0.0f, 1.0f - nx * nx - ny * ny));
+        float3 n = rec->frontFace ? rec->normal : -rec->normal;
+        float3 t = tanU - n * dot(n, tanU);
+        float lt = length(t);
+        if (lt > 1e-8f) {
+            t = t / lt;
+            float3 b = cross(n, t);
+            if (dot(b, tanV) < 0.0f) b = -b;
+            float3 p = t * nx + b * ny + n * nz;
+            p = p / length(p);
+            float3 shaded = rec->frontFace ? p : -p;
+            if (dot(shaded, direction) < 0.0f) rec->normal = shaded;
+        }
+    }
+#endif
 }
 
 #if RT_OPTIX
@@ -871,16 +1016,21 @@ __device__ inline float3 refract_dir(float3 uv, float3 n, float etaiOverEtat) {
 }
 
 /** Light a surface gives off by itself; only DiffuseLight has any. */
-__device__ inline float3 material_emitted(const int* matI,
+__device__ inline float3 material_emitted(const int* matI, const float* matF,
                                const int* texI, const float* texF,
                                const unsigned char* images,
                                const float* perlinVectors, const int* perlinPermutations,
                                const HitRecord* rec) {
     // Only emissive materials, and only through their front: a lamp does not light the room
     // through the back of the ceiling.
-    if (!MAT_EMISSIVE || matI[rec->material * 2] != 3 || !rec->frontFace) return make_float3(0.0f, 0.0f, 0.0f);
-    return texture_value(texI, texF, images, perlinVectors, perlinPermutations,
-                         matI[rec->material * 2 + 1], rec->u, rec->v, rec->point);
+    if (!MAT_EMISSIVE || !rec->frontFace) return make_float3(0.0f, 0.0f, 0.0f);
+    int m = rec->material * 4;
+    if (matI[m] == 3)
+        return texture_value(texI, texF, images, perlinVectors, perlinPermutations, matI[m + 1], rec->u, rec->v, rec->point);
+    // A surface that also glows where its emission texture says so - embers in a bowl.
+    if (matI[m + 2] >= 0)
+        return texture_value(texI, texF, images, perlinVectors, perlinPermutations, matI[m + 2], rec->u, rec->v, rec->point) * matF[m + 2];
+    return make_float3(0.0f, 0.0f, 0.0f);
 }
 
 /**
@@ -918,8 +1068,8 @@ __device__ inline bool scatter(const int* matI, const float* matF,
                     const float* perlinVectors, const int* perlinPermutations,
                     const HitRecord* rec, float3 inDirection, Rng* rng,
                     ScatterRec* srec) {
-    int type = matI[rec->material * 2];
-    int texture = matI[rec->material * 2 + 1];
+    int type = matI[rec->material * 4];
+    int texture = matI[rec->material * 4 + 1];
 
     srec->skipPdf = false;
     srec->pdfKind = PDF_COSINE;
@@ -949,11 +1099,52 @@ __device__ inline bool scatter(const int* matI, const float* matF,
     srec->skipPdf = true;                                 // specular from here on
 
     if (MAT_METAL && type == 1) {                                      // Metal
-        float fuzz = matF[rec->material * 2];
+        float fuzz = matF[rec->material * 4];
+        // A roughness texture, read as data: GGX's alpha, its square, blurs the reflection.
+        int roughTexture = matI[rec->material * 4 + 3];
+        if (roughTexture >= 0) {
+            float r = texture_value(texI, texF, images, perlinVectors, perlinPermutations, roughTexture, rec->u, rec->v, rec->point).x;
+            fuzz = r * r;
+        }
+        float3 tint = texture_value(texI, texF, images, perlinVectors, perlinPermutations,
+                                    texture, rec->u, rec->v, rec->point);
+        if (matF[rec->material * 4 + 1] > 0.5f) {
+            // A model file's metal, as a game engine draws it: GGX microfacets of alpha = roughness
+            // squared (the fuzz above), a facet normal drawn in proportion to D(h) cos(h), the
+            // reflection off it weighed by Schlick's Fresnel and Smith's shadowing,
+            // F G (v.h) / ((n.v)(n.h)) - the rest of the microfacet density cancels in that draw.
+            float alpha = fmaxf(fuzz, 0.002f);
+            float a2 = alpha * alpha;
+            float3 n = rec->normal;
+            float3 v = -unitDirection;
+            float nv = dot(n, v);
+            if (nv <= 0.0f) return false;
+            float u1 = rng_float(rng);
+            float u2 = rng_float(rng);
+            float cos2 = (1.0f - u2) / (1.0f + (a2 - 1.0f) * u2);
+            float cosH = sqrtf(cos2);
+            float sinH = sqrtf(fmaxf(0.0f, 1.0f - cos2));
+            float phi = 2.0f * M_PI_F * u1;
+            float3 bu, bv, bw;
+            onb_build(n, &bu, &bv, &bw);
+            float3 h = bu * (sinH * cosf(phi)) + bv * (sinH * sinf(phi)) + bw * cosH;
+            float vh = dot(v, h);
+            if (vh <= 0.0f) return false;
+            float3 l = h * (2.0f * vh) - v;
+            float nl = dot(n, l);
+            if (nl <= 0.0f || dot(l, rec->gnormal) <= 0.0f) return false;
+            float m = 1.0f - vh;
+            float m5 = m * m * m * m * m;
+            float3 fresnel = tint + (make_float3(1.0f, 1.0f, 1.0f) - tint) * m5;
+            float gv = 2.0f * nv / (nv + sqrtf(a2 + (1.0f - a2) * nv * nv));
+            float gl = 2.0f * nl / (nl + sqrtf(a2 + (1.0f - a2) * nl * nl));
+            srec->attenuation = fresnel * (gv * gl * vh / (nv * cosH));
+            srec->direction = l;
+            return true;
+        }
         float3 reflected = unitDirection - rec->normal * (2.0f * dot(unitDirection, rec->normal));
         reflected = reflected / length(reflected);
-        srec->attenuation = texture_value(texI, texF, images, perlinVectors, perlinPermutations,
-                                          texture, rec->u, rec->v, rec->point);
+        srec->attenuation = tint;
         srec->direction = reflected + random_unit_vector(rng) * fuzz;
         // A reflection under the surface itself - off a smooth normal, or fuzzed past the
         // horizon - is absorbed, as in the book's Metal.
@@ -962,7 +1153,7 @@ __device__ inline bool scatter(const int* matI, const float* matF,
 
     // Dielectric - the only material left, unless the scene has none.
     if (!MAT_DIELECTRIC) return false;
-    float ri = matF[rec->material * 2 + 1];
+    float ri = matF[rec->material * 4 + 1];
     float refractionRatio = rec->frontFace ? (1.0f / ri) : ri;
     float cosTheta = fminf(dot(-unitDirection, rec->normal), 1.0f);
     float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
@@ -972,6 +1163,14 @@ __device__ inline bool scatter(const int* matI, const float* matF,
     bool useReflect = cannotRefract || (reflectance(cosTheta, refractionRatio) > rng_float(rng));
 
     srec->attenuation = make_float3(1.0f, 1.0f, 1.0f);
+    // Tinted glass (Beer-Lambert): a ray leaving it - a hit on the inside - has gone rec->t times
+    // its direction's length through it, and [tint distance] of that leaves the tint's colour.
+    float tintDistance = matF[rec->material * 4];
+    if (tintDistance > 0.0f && !rec->frontFace) {
+        float3 tint = texture_value(texI, texF, images, perlinVectors, perlinPermutations, texture, rec->u, rec->v, rec->point);
+        float k = rec->t * length(inDirection) / tintDistance;
+        srec->attenuation = make_float3(powf(tint.x, k), powf(tint.y, k), powf(tint.z, k));
+    }
     srec->direction = useReflect
         ? unitDirection - rec->normal * (2.0f * dot(unitDirection, rec->normal))
         : refract_dir(unitDirection, rec->normal, refractionRatio);
@@ -985,10 +1184,10 @@ __device__ inline float3 aov_albedo(const int* matI,
                          const unsigned char* images,
                          const float* perlinVectors, const int* perlinPermutations,
                          const HitRecord* rec) {
-    int type = matI[rec->material * 2];
+    int type = matI[rec->material * 4];
     if (type == 2) return make_float3(1.0f, 1.0f, 1.0f);
     float3 colour = texture_value(texI, texF, images, perlinVectors, perlinPermutations,
-                                  matI[rec->material * 2 + 1], rec->u, rec->v, rec->point);
+                                  matI[rec->material * 4 + 1], rec->u, rec->v, rec->point);
     return clamp(colour, 0.0f, 1.0f);
 }
 
@@ -1002,7 +1201,7 @@ __device__ inline float3 preview_shade(const int* matI,
                             const unsigned char* images,
                             const float* perlinVectors, const int* perlinPermutations,
                             const HitRecord* rec, float3 direction) {
-    int type = matI[rec->material * 2];
+    int type = matI[rec->material * 4];
     float3 colour = aov_albedo(matI, texI, texF, images, perlinVectors, perlinPermutations, rec);
     if (type == 3) return colour;
     if (type == 2) colour = make_float3(0.70f, 0.82f, 0.92f);
@@ -1086,6 +1285,191 @@ __device__ inline float light_pdf_value(const Scene* sc, const int* lights, int 
     }
     return sum;
 }
+
+// ---------------------------------------------------------------- caustics
+
+/**
+ * Whether light passing through this surface makes caustics the photons carry: glass, and metal
+ * smoother than CAUSTIC_MAX_FUZZ where it was hit (its roughness texture read there). The one
+ * test both the photon pass and the camera paths make, so they cannot disagree on who counts what.
+ */
+__device__ inline bool is_caster(const int* matI, const float* matF, const int* texI, const float* texF,
+                                 const unsigned char* images, const float* perlinVectors, const int* perlinPermutations,
+                                 const HitRecord* rec) {
+    int m = rec->material * 4;
+    int kind = matI[m];
+    if (kind == 2) return true;
+    if (kind != 1) return false;
+    float fuzz = matF[m];
+    int rough = matI[m + 3];
+    if (rough >= 0) {
+        float r = texture_value(texI, texF, images, perlinVectors, perlinPermutations, rough, rec->u, rec->v, rec->point).x;
+        fuzz = r * r;
+    }
+    return fuzz <= CAUSTIC_MAX_FUZZ;
+}
+
+/** The grid cell a point falls in, hashed into the table; kernels/caustics_grid.cu hashes the same way. */
+__device__ inline int caustic_cell(int x, int y, int z, int mask) {
+    unsigned int h = ((unsigned int)x * 73856093u) ^ ((unsigned int)y * 19349663u) ^ ((unsigned int)z * 83492791u);
+    return (int)(h & (unsigned int)mask);
+}
+
+#if CAUSTICS
+/**
+ * The irradiance the photons bring to point x, whose normal n faces the camera's path: the flux
+ * of those in a disc of the launch's radius, on the surface (a thin slab round its plane) and
+ * arriving on the path's side, weighed by 1 - d^2/r^2 (Epanechnikov) over that kernel's integral,
+ * pi r^2 / 2. A Lambertian surface turns it into radiance with albedo / pi.
+ */
+__device__ inline float3 caustic_gather(const CausticParams* cp, float3 x, float3 n) {
+    float r = cp->radius;
+    float r2 = r * r;
+    float cs = cp->cellSize;
+    float slab = 0.25f * r;
+    int mask = cp->tableSize - 1;
+    int x0 = (int)floorf((x.x - r) / cs), x1 = (int)floorf((x.x + r) / cs);
+    int y0 = (int)floorf((x.y - r) / cs), y1 = (int)floorf((x.y + r) / cs);
+    int z0 = (int)floorf((x.z - r) / cs), z1 = (int)floorf((x.z + r) / cs);
+    int seen[8];
+    int seenCount = 0;
+    float3 sum = make_float3(0.0f, 0.0f, 0.0f);
+    for (int cz = z0; cz <= z1; cz++)
+        for (int cy = y0; cy <= y1; cy++)
+            for (int cx = x0; cx <= x1; cx++) {
+                int h = caustic_cell(cx, cy, cz, mask);
+                // Two cells that hash alike share a run: read it once.
+                bool again = false;
+                for (int k = 0; k < seenCount; k++) again = again || seen[k] == h;
+                if (again) continue;
+                if (seenCount < 8) seen[seenCount++] = h;
+                int end = cp->cellStart[h + 1];
+                for (int i = cp->cellStart[h]; i < end; i++) {
+                    const float* P = cp->sorted + i * PHOTON_FLOATS;
+                    float3 d = make_float3(P[0] - x.x, P[1] - x.y, P[2] - x.z);
+                    float d2 = dot(d, d);
+                    if (d2 >= r2) continue;
+                    if (fabsf(dot(d, n)) > slab) continue;
+                    if (P[4] * n.x + P[5] * n.y + P[6] * n.z >= 0.0f) continue;
+                    sum += make_float3(P[8], P[9], P[10]) * (1.0f - d2 / r2);
+                }
+            }
+    return sum * (2.0f / (M_PI_F * r2));
+}
+#endif
+
+#if AOV_MODE == 5
+/**
+ * Photon [index] of the launch: from a light picked in proportion to the light it sends the
+ * casters, from a point on it, in a direction aimed at one of the spheres round the casters (the
+ * density being the mixture over all of them, right where they overlap); refracted and reflected
+ * by each caster as a camera path would be, until it lands on a Lambertian surface - stored, with
+ * its flux - or is lost: missed everything, landed before any caster, on a lamp or on anything
+ * else. Its slot says which.
+ */
+__device__ void photon_shoot(const Scene* sc, int rootNode,
+                             const int* matI, const float* matF, const int* texI, const float* texF,
+                             const unsigned char* images, const float* perlinVectors, const int* perlinPermutations,
+                             const int* lights, int lightCount, const CausticParams* cp, int index,
+                             unsigned long long seed, int sampleStart, int maxDepth) {
+    float* slot = cp->photons + index * PHOTON_FLOATS;
+    slot[3] = 0.0f;
+    if (lightCount <= 0 || cp->aimCount <= 0) return;
+    Rng rng;
+    // Streams of their own, apart from every pixel's.
+    rng_init(&rng, seed ^ 0x5DEECE66DULL, 0x100000000ULL + (unsigned long long)index, (unsigned long long)sampleStart);
+
+    float pickAt = rng_float(&rng);
+    int pick = 0;
+    while (pick < lightCount - 1 && cp->lightCdf[pick] < pickAt) pick++;
+    float prob = cp->lightCdf[pick] - (pick > 0 ? cp->lightCdf[pick - 1] : 0.0f);
+    if (prob <= 0.0f) return;
+
+    int kind = lights[pick * 2];
+    int li = lights[pick * 2 + 1];
+    float3 p, n;
+    float pdfArea, extent;
+    int material;
+    if (kind == LEAF_QUAD) {
+        const float* q = sc->quads + li * 16;
+        float3 Q = make_float3(q[0], q[1], q[2]);
+        float3 U = make_float3(q[3], q[4], q[5]);
+        float3 V = make_float3(q[6], q[7], q[8]);
+        p = Q + U * rng_float(&rng) + V * rng_float(&rng);
+        n = make_float3(q[12], q[13], q[14]);          // a quad lights only its front
+        float area = length(cross(U, V));
+        pdfArea = 1.0f / area;
+        extent = sqrtf(area);
+        material = sc->quadMaterials[li];
+    } else {
+        const float* sp = sc->spheres + li * 8;
+        float radius = sp[6];
+        n = random_unit_vector(&rng);
+        p = make_float3(sp[0], sp[1], sp[2]) + n * radius;
+        pdfArea = 1.0f / (4.0f * M_PI_F * radius * radius);
+        extent = radius;
+        material = sc->sphereMaterials[li];
+    }
+    float3 emitted = texture_value(texI, texF, images, perlinVectors, perlinPermutations, matI[material * 4 + 1], 0.5f, 0.5f, p);
+
+    int a = min((int)(rng_float(&rng) * (float)cp->aimCount), cp->aimCount - 1);
+    float3 toAim = make_float3(cp->aim[a * 4], cp->aim[a * 4 + 1], cp->aim[a * 4 + 2]) - p;
+    float aimRadius = cp->aim[a * 4 + 3];
+    float aimDistance2 = dot(toAim, toAim);
+    float3 d;
+    if (aimDistance2 <= aimRadius * aimRadius) {
+        d = random_unit_vector(&rng);
+    } else {
+        float3 bu, bv, bw;
+        onb_build(toAim, &bu, &bv, &bw);
+        float3 s = random_to_sphere(&rng, aimRadius, aimDistance2);
+        d = bu * s.x + bv * s.y + bw * s.z;
+    }
+    d = d / length(d);
+    float cosLight = dot(n, d);
+    if (cosLight <= 0.0f) return;
+
+    // The density of that direction: the mixture over every aim's cone that holds it.
+    float pdfDirection = 0.0f;
+    for (int k = 0; k < cp->aimCount; k++) {
+        float3 t = make_float3(cp->aim[k * 4], cp->aim[k * 4 + 1], cp->aim[k * 4 + 2]) - p;
+        float tt = dot(t, t);
+        float rk2 = cp->aim[k * 4 + 3] * cp->aim[k * 4 + 3];
+        if (tt <= rk2) { pdfDirection += 1.0f / (4.0f * M_PI_F); continue; }
+        float x = rk2 / tt;
+        float cosMax = sqrtf(1.0f - x);
+        // 1 - cosMax as x / (1 + cosMax): no cancellation for a far, small aim (the sun 3400 units off).
+        if (dot(d, t) * rsqrtf(tt) >= cosMax) pdfDirection += 1.0f / (2.0f * M_PI_F * (x / (1.0f + cosMax)));
+    }
+    pdfDirection /= (float)cp->aimCount;
+    if (pdfDirection <= 0.0f) return;
+
+    float3 flux = emitted * (cosLight / (pdfArea * pdfDirection * prob * (float)cp->photonCount));
+    float3 origin = p + n * (extent * 1e-5f + 1e-4f);
+    float time = rng_float(&rng);
+    int casterHits = 0;
+    for (int bounce = 0; bounce < maxDepth; bounce++) {
+        HitRecord rec;
+        if (!world_hit(sc, rootNode, origin, d, time, 0.001f, INFINITY, &rng, &rec)) return;
+        int hitKind = matI[rec.material * 4];
+        if (hitKind == 3) return;
+        if (is_caster(matI, matF, texI, texF, images, perlinVectors, perlinPermutations, &rec)) {
+            ScatterRec srec;
+            if (!scatter(matI, matF, texI, texF, images, perlinVectors, perlinPermutations, &rec, d, &rng, &srec)) return;
+            flux *= srec.attenuation;
+            origin = rec.point;
+            d = srec.direction / length(srec.direction);
+            casterHits++;
+            continue;
+        }
+        if (casterHits == 0 || hitKind != 0) return;
+        slot[0] = rec.point.x; slot[1] = rec.point.y; slot[2] = rec.point.z; slot[3] = 1.0f;
+        slot[4] = d.x; slot[5] = d.y; slot[6] = d.z; slot[7] = 0.0f;
+        slot[8] = flux.x; slot[9] = flux.y; slot[10] = flux.z; slot[11] = 0.0f;
+        return;
+    }
+}
+#endif
 
 // ---------------------------------------------------------------- entry point
 
@@ -1172,7 +1556,14 @@ extern "C" __global__ void __raygen__render() {
     const float* perlinVectors = params.perlinVectors;
     const int* perlinPermutations = params.perlinPermutations;
     const float* triangleNormals = params.triangleNormals;
+    const float* triangleUvs = nullptr;  // the loose triangles never carry texture coordinates under OptiX
     const float fireflyClamp = params.fireflyClamp;
+    const float* env = params.env;
+    const int envWidth = params.envWidth;
+    const int envHeight = params.envHeight;
+    const float envScale = params.envScale;
+    const float envTurn = params.envTurn;
+    const CausticParams* caustic = params.caustic;
     float* out = params.out;
     float* guideNormal = params.guideNormal;
     float* guideFlow = params.guideFlow;
@@ -1213,6 +1604,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                      const float* __restrict__ perlinVectors,
                      const int* __restrict__ perlinPermutations,
                      const float* __restrict__ triangleNormals,
+                     const float* __restrict__ triangleUvs,
                      float* out,
                      float* guideNormal,
                      float* guideFlow,
@@ -1225,14 +1617,26 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                      const int rootNode,
                      const int lightCount,
                      const unsigned long long seed,
-                     const float fireflyClamp) {
-    // Work items come in warps of 32, each covering an 8x4 tile of pixels.
+                     const float fireflyClamp,
+                     const float* __restrict__ env,
+                     const int envWidth,
+                     const int envHeight,
+                     const float envScale,
+                     const float envTurn,
+                     const CausticParams* __restrict__ caustic) {
     int gid = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+#if AOV_MODE == 5
+    // The photon pass: a thread a photon, the "image" photonCount wide and one high.
+    int x = gid;
+    int y = 0;
+#else
+    // Work items come in warps of 32, each covering an 8x4 tile of pixels.
     int tile = gid >> 5;
     int lane = gid & 31;
     int tilesX = (width + 7) >> 3;
     int x = (tile % tilesX) * 8 + (lane & 7);
     int y = (tile / tilesX) * 4 + (lane >> 3);
+#endif
     if (x >= width || y >= height) return;
 
 #endif
@@ -1250,6 +1654,16 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     scene.mediumInts = mediumInts;
     scene.mediumFloats = mediumFloats;
     scene.triangleNormals = triangleNormals;
+    scene.triangleUvs = triangleUvs;
+    scene.matF = matF;
+    scene.texI = texI;
+    scene.images = images;
+
+#if AOV_MODE == 5
+    photon_shoot(&scene, rootNode, matI, matF, texI, texF, images, perlinVectors, perlinPermutations,
+                 lights, lightCount, caustic, x, seed, sampleStart, maxReflectionDepth);
+    return;
+#endif
 
     float3 cameraCenter = make_float3(cam[0], cam[1], cam[2]);
     float3 pixel00      = make_float3(cam[3], cam[4], cam[5]);
@@ -1285,6 +1699,13 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     float3 origin, direction, throughput, sampleColor;
     float time;
     int depth;
+#if CAUSTICS
+    // 0 until the path reaches a surface that is not a caster; 1 when that was a gathered
+    // Lambertian, 2 once a caster follows it - a lamp found then is the photons' to count -
+    // and 3 once the path is past all that.
+    int causticState = 0;
+    float3 causticColor = make_float3(0.0f, 0.0f, 0.0f);
+#endif
 
     while (sample < sampleEnd) {
         if (fresh) {
@@ -1310,6 +1731,10 @@ extern "C" __global__ void render(const float* __restrict__ cam,
             throughput = make_float3(1.0f, 1.0f, 1.0f);
             sampleColor = make_float3(0.0f, 0.0f, 0.0f);
             depth = 0;
+#if CAUSTICS
+            causticState = 0;
+            causticColor = make_float3(0.0f, 0.0f, 0.0f);
+#endif
             fresh = false;
         }
 
@@ -1321,16 +1746,12 @@ extern "C" __global__ void render(const float* __restrict__ cam,
             for (int layer = 0; layer < PREVIEW_LAYERS; layer++) {
                 HitRecord hit;
                 if (!world_hit(&scene, rootNode, origin, direction, time, 0.001f, INFINITY, &rng, &hit)) {
-                    float3 sky = background;
-                    if (!flatBackground) {
-                        float alpha = 0.5f * (direction.y / length(direction) + 1.0f);
-                        sky = make_float3(1.0f, 1.0f, 1.0f) * (1.0f - alpha) + make_float3(0.5f, 0.7f, 1.0f) * alpha;
-                    }
+                    float3 sky = sky_colour(env, envWidth, envHeight, envScale, envTurn, direction, background, flatBackground);
                     shaded += carried * sky;
                     break;
                 }
                 float3 surface = preview_shade(matI, texI, texF, images, perlinVectors, perlinPermutations, &hit, direction);
-                if (matI[hit.material * 2] != 2 || layer == PREVIEW_LAYERS - 1) {
+                if (matI[hit.material * 4] != 2 || layer == PREVIEW_LAYERS - 1) {
                     shaded += carried * surface;
                     break;
                 }
@@ -1392,7 +1813,31 @@ extern "C" __global__ void render(const float* __restrict__ cam,
         bool done = false;
         HitRecord rec;
         if (world_hit(&scene, rootNode, origin, direction, time, 0.001f, INFINITY, &rng, &rec)) {
-            sampleColor += throughput * material_emitted(matI, texI, texF, images,
+#if CAUSTICS
+            bool photonsLight = false;
+            if (causticState < 3) {
+                int kind = matI[rec.material * 4];
+                bool caster = is_caster(matI, matF, texI, texF, images, perlinVectors, perlinPermutations, &rec);
+                if (causticState == 0) {
+                    if (!caster) {
+                        if (kind == 0) {
+                            float3 albedo = texture_value(texI, texF, images, perlinVectors, perlinPermutations,
+                                                          matI[rec.material * 4 + 1], rec.u, rec.v, rec.point);
+                            causticColor += throughput * albedo * (1.0f / M_PI_F) * caustic_gather(caustic, rec.point, rec.normal);
+                            causticState = 1;
+                        } else {
+                            causticState = 3;
+                        }
+                    }
+                } else if (kind == 3 && causticState == 2) {
+                    photonsLight = true;
+                } else {
+                    causticState = caster ? 2 : 3;
+                }
+            }
+            if (!photonsLight)
+#endif
+            sampleColor += throughput * material_emitted(matI, matF, texI, texF, images,
                                                          perlinVectors, perlinPermutations, &rec);
             ScatterRec srec;
             if (!scatter(matI, matF, texI, texF, images, perlinVectors, perlinPermutations,
@@ -1415,14 +1860,14 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                 }
                 if (density < 1e-8f) {
                     done = true;
-                } else if (matI[rec.material * 2] != 4 && dot(chosen, rec.gnormal) <= 0.0f) {
+                } else if (matI[rec.material * 4] != 4 && dot(chosen, rec.gnormal) <= 0.0f) {
                     // A direction under the surface itself - which a smooth normal can lean into -
                     // would leak light through it. (Fog scatters every way; it has no surface.)
                     done = true;
                 } else {
                     // Weigh the sample by how much the surface actually scatters that way;
                     // that division is what keeps the estimate unbiased.
-                    float surface = scattering_pdf(matI[rec.material * 2], rec.normal, chosen);
+                    float surface = scattering_pdf(matI[rec.material * 4], rec.normal, chosen);
                     throughput *= srec.attenuation * (surface / density);
 
                     origin = rec.point;
@@ -1439,13 +1884,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                 else throughput /= survival;
             }
         } else {
-            float3 escaped = background;
-            if (!flatBackground) {
-                float3 unitDirection = direction / length(direction);
-                float alpha = 0.5f * (unitDirection.y + 1.0f);
-                escaped = make_float3(1.0f, 1.0f, 1.0f) * (1.0f - alpha)
-                        + make_float3(0.5f, 0.7f, 1.0f) * alpha;
-            }
+            float3 escaped = sky_colour(env, envWidth, envHeight, envScale, envTurn, direction, background, flatBackground);
             sampleColor += throughput * escaped;
             done = true;
         }
@@ -1461,6 +1900,11 @@ extern "C" __global__ void render(const float* __restrict__ cam,
             if (sampleColor.x == sampleColor.x && sampleColor.y == sampleColor.y && sampleColor.z == sampleColor.z) {
                 pixelColor += sampleColor;
             }
+#if CAUSTICS
+            if (causticColor.x == causticColor.x && causticColor.y == causticColor.y && causticColor.z == causticColor.z) {
+                pixelColor += causticColor;
+            }
+#endif
             sample++;
             fresh = true;
         }

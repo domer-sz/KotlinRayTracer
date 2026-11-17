@@ -9,7 +9,12 @@ import rayTraceTypescript.textures.SolidColorTexture
 import rayTraceTypescript.textures.Texture
 import rayTraceTypescript.utils.pi
 
-class Lambertian(val texture: Texture) : Material {
+/**
+ * A matte surface coloured by [texture]. A model file's may also glow: [glow] (its `map_Ke`) times
+ * [glowScale] is light it gives off on top of what it reflects - the embers in a fire pit's bowl.
+ */
+/** [normalMap]: a tangent-space normal map read as data (DirectX green), bending the shading normal on the GPU. */
+class Lambertian(val texture: Texture, val glow: Texture? = null, val glowScale: Float = 0f, val normalMap: Texture? = null) : Material {
     constructor(color: Color) : this(SolidColorTexture(color))
 
     override fun scatter(rayIn: Ray, hit: Hit): ScatterRecord =

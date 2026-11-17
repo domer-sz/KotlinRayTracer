@@ -9,7 +9,7 @@ package rayTraceTypescript.render
  * set up for one size and reuses it for the next call of that size.
  */
 interface ImageDenoiser : AutoCloseable {
-    /** What denoises and where, for a log or a status line: "OptiX (GTX 1070)", "OptiX (RTX 2060), 2x". */
+    /** What denoises and where, for a log or a status line: "OptiX (RTX 2060)", "OptiX (RTX 2060), 2x". */
     val name: String
 
     /**

@@ -46,7 +46,8 @@ object BookScenes {
         "cornell-model" to { cornellModel() },
         "showcase" to { showcase() },
         "model" to { model() },
-        "studio-model" to { studioModel() }
+        "studio-model" to { studioModel() },
+        "file" to { fileScene() }
     )
 
     val names: List<String> get() = scenes.keys.toList()
@@ -664,6 +665,117 @@ object BookScenes {
             parts = listOf(ScenePart("Figura", figure))
         )
     }
+
+    /**
+     * Not from the books: a whole scene from one model file (-Drt.model), such as Amazon
+     * Lumberyard Bistro exported to OBJ - at its authored size, in the colours its .mtl gives
+     * (grey without them), under the sky gradient and a sun, the camera framing its box from
+     * above one corner. A placed mesh, so OptiX builds its tree on the card and the CPU never
+     * makes one. -Drt.model.zup stands a z-up file up; -Drt.sun=off leaves only the sky;
+     * -Drt.sun=<x,y,z> points at the sun; -Drt.camera.from=<x,y,z>, -Drt.camera.at=<x,y,z> and
+     * -Drt.camera.vfov=<degrees> place the camera instead (Bistro's own street-level camera:
+     * from 24.82,3.16,-61.65 at 24.77,3.15,-61.5, 43 degrees).
+     *
+     * A `<model>.lights` file beside the model (what the Blender conversion writes from the FBX's
+     * lights) adds them: `point x y z r g b watts` becomes a small glowing ball the renderer aims
+     * samples at, `sun dx dy dz r g b strength` sets where the sun stands and its colour.
+     * -Drt.lights.scale=<k> brightens or dims the point lights.
+     *
+     * -Drt.env=<file.hdr> lights it with an HDR map instead of the sky gradient (-Drt.env.intensity,
+     * -Drt.env.turn=<degrees>), -Drt.sun.power=<k> makes the sun k times as bright. Its images are
+     * tone mapped with ACES unless -Drt.tonemap says otherwise ([rayTraceTypescript.render.ToneMap]).
+     */
+    fun fileScene(): SceneDefinition {
+        val path = System.getProperty("rt.model") ?: System.getenv("MODEL_FILE") ?: "model.stl"
+        val loaded = MeshLoader.load(path)
+        val mesh = if (System.getProperty("rt.model.zup") != null) loaded.zUpToYUp() else loaded
+        println("Loaded ${mesh.triangleCount} triangles from $path${if (mesh.hasColours) ", ${mesh.palette.size} materials" else ""}")
+        val block = rayTraceTypescript.gpu.MeshBlock(mesh)
+        val palette = if (mesh.hasColours) mesh.palette.map { it.material() } else null
+        val model = rayTraceTypescript.gpu.PlacedMesh(block, 1f, 0f, Vector(0f, 0f, 0f), Lambertian(Color(0.6f, 0.6f, 0.6f)), palette)
+
+        val b = block.bounds
+        val centre = Point((b.x.min + b.x.max) / 2, (b.y.min + b.y.max) / 2, (b.z.min + b.z.max) / 2)
+        val size = Vector(b.x.max - b.x.min, b.y.max - b.y.min, b.z.max - b.z.min)
+        val diagonal = size.length()
+
+        val world = HittableList(mutableListOf<Hittable>(model))
+        val lamps = mutableListOf<Hittable>()
+        var fileSun: Pair<Vector, Color>? = null
+        val sidecar = java.io.File(path.substringBeforeLast('.') + ".lights")
+        if (sidecar.isFile) {
+            val scale = System.getProperty("rt.lights.scale")?.toFloatOrNull() ?: 1f
+            sidecar.readLines().map { it.trim().split(Regex("[ \\t]+")) }.forEach { p ->
+                val n = p.drop(1).mapNotNull { it.toFloatOrNull() }
+                if (n.size < 7) return@forEach
+                when (p[0]) {
+                    "point" -> {
+                        // A ball LAMP_RADIUS across - or the eighth number's radius - as bright as a point
+                        // light of that many watts: its intensity, watts / 4 pi, is its radiance times its
+                        // disc, pi r^2. A larger ball softens shadows and caustics, and clears their noise.
+                        val r = n.getOrNull(7)?.takeIf { it > 0f } ?: LAMP_RADIUS
+                        val radiance = n[6] / (4f * Math.PI.toFloat()) * scale / (Math.PI.toFloat() * r * r)
+                        lamps += Sphere(Point(n[0], n[1], n[2]), r, DiffuseLight(Color(n[3] * radiance, n[4] * radiance, n[5] * radiance)))
+                    }
+                    "sun" -> fileSun = Vector(n[0], n[1], n[2]) to Color(n[3], n[4], n[5])
+                }
+            }
+            println("Lights from ${sidecar.name}: ${lamps.size} lamps${if (fileSun != null) " and the sun" else ""}")
+        }
+        lamps.forEach { world.add(it) }
+        val sunSetting = System.getProperty("rt.sun")
+        val sun = if (sunSetting == "off") null else {
+            val toward = sunSetting?.split(",")?.mapNotNull { it.trim().toFloatOrNull() }?.takeIf { it.size == 3 }
+                ?.let { Vector(it[0], it[1], it[2]) } ?: fileSun?.first ?: Vector(0.45f, 1.0f, 0.3f)
+            val unit = toward * (1f / toward.length())
+            // A disc 0.05 rad across at 4 diagonals: about three times the sky's light on a lit face,
+            // in the file's colour when it gives one.
+            val distance = diagonal * 4f
+            val at = centre + unit * distance
+            val tint = fileSun?.second?.let { c -> val top = maxOf(c.r, c.g, c.b, 1e-6f); Color(c.r / top, c.g / top, c.b / top) } ?: Color(1f, 0.92f, 0.82f)
+            // -Drt.sun.size=<radians> narrows the disc for crisper shadows; its radiance rises with
+            // the square of the shrink, so the light it casts stays the same.
+            val size = System.getProperty("rt.sun.size")?.toFloatOrNull()?.takeIf { it > 0f } ?: 0.05f
+            val power = 380f * (System.getProperty("rt.sun.power")?.toFloatOrNull() ?: 1f) * (0.05f / size) * (0.05f / size)
+            Sphere(Point(at.x, at.y, at.z), distance * size, DiffuseLight(Color(power * tint.r, power * tint.g, power * tint.b)))
+        }
+        sun?.let { world.add(it) }
+        val aimed = (listOfNotNull(sun) + lamps).takeIf { it.isNotEmpty() }
+        val environment = System.getProperty("rt.env")?.let { file ->
+            rayTraceTypescript.textures.Environment.load(java.nio.file.Paths.get(file)).with(
+                intensity = System.getProperty("rt.env.intensity")?.toFloatOrNull() ?: 1f,
+                turnDegrees = System.getProperty("rt.env.turn")?.toFloatOrNull() ?: 0f
+            ).also { println("Environment ${java.io.File(file).name}: ${it.width}x${it.height}") }
+        }
+        // A whole scene from a game looks right through a filmic curve, as the game showed it.
+        if (System.getProperty("rt.tonemap") == null) System.setProperty("rt.tonemap", "aces")
+
+        val view = Vector(1.0f, 0.55f, 1.0f).let { it * (1f / it.length()) }
+        fun point(property: String): Point? = System.getProperty(property)?.split(",")?.mapNotNull { it.trim().toFloatOrNull() }
+            ?.takeIf { it.size == 3 }?.let { Point(it[0], it[1], it[2]) }
+        val from = point("rt.camera.from") ?: (centre + view * (diagonal * 0.75f)).let { Point(it.x, it.y, it.z) }
+        val at = point("rt.camera.at") ?: centre
+        return SceneDefinition(
+            name = "file",
+            world = world,
+            camera = Camera().apply {
+                aspectRatio = 16.0f / 9.0f
+                imageWidth = 1280
+                samplesPerPixel = 64
+                maxReflectionDepth = 8
+                vfov = System.getProperty("rt.camera.vfov")?.toFloatOrNull() ?: 50.0f
+                lookAt = at
+                lookFrom = from
+                vUp = Vector(0f, 1f, 0f)
+                defocusAngle = 0f
+                lights = aimed?.let { HittableList(it.toMutableList()) }
+                this.environment = environment
+            }
+        )
+    }
+
+    /** How big a point light of a scene file is drawn, in its units (metres for Bistro and Sun Temple). */
+    private const val LAMP_RADIUS = 0.1f
 
     /** A fog ball this big takes in the studio: the floor's half width is 48.7, the wall 50 away. */
     private const val STUDIO_ROOM_RADIUS = 60f

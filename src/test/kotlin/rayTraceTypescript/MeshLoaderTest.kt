@@ -118,6 +118,62 @@ class MeshLoaderTest {
     }
 
     @Test
+    fun `obj reads texture coordinates and the colour image its library names`() {
+        val obj = write(
+            "textured.obj",
+            """
+            mtllib textured.mtl
+            v 0 0 0
+            v 1 0 0
+            v 1 1 0
+            v 0 1 0
+            vt 0 0
+            vt 2 0
+            vt 2 1
+            vt 0 1
+            usemtl wall
+            f 1/1 2/2 3/3 4/4
+            f 1 3 4
+            """.trimIndent()
+        )
+        Files.writeString(obj.resolveSibling("textured.mtl"), "newmtl wall\nKd 0.5 0.5 0.5\nmap_Kd -bm 1 wall.png\n")
+        val image = java.awt.image.BufferedImage(4, 2, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        javax.imageio.ImageIO.write(image, "png", obj.resolveSibling("wall.png").toFile())
+
+        val mesh = MeshLoader.load(obj)
+        val uvs = mesh.uvs!!
+        // The quad fans into two triangles, each corner with its own coordinates.
+        assertEquals(listOf(0f, 0f, 2f, 0f, 2f, 1f), uvs.copyOfRange(0, 6).toList())
+        assertEquals(listOf(0f, 0f, 2f, 1f, 0f, 1f), uvs.copyOfRange(6, 12).toList())
+        // A face whose corners name none has none.
+        assertTrue(uvs[12].isNaN())
+        assertEquals(obj.resolveSibling("wall.png"), mesh.palette[0].texture)
+        val material = mesh.palette[0].material() as rayTraceTypescript.materials.Lambertian
+        assertTrue(material.texture is rayTraceTypescript.textures.ImageTexture)
+        // Moving the mesh keeps its coordinates.
+        assertEquals(uvs.toList(), mesh.zUpToYUp().rotatedY(30f).standingOnFloor().uvs!!.toList())
+    }
+
+    @Test
+    fun `tinted glass keeps its colour by the distance through it`() {
+        val obj = write("amber.obj", "mtllib amber.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl amber\nf 1 2 3\n")
+        Files.writeString(obj.resolveSibling("amber.mtl"), "newmtl amber\nd 0\nNi 1.52\nTf 0.9 0.5 0.1 0.2\n")
+        val glass = MeshLoader.load(obj).palette[0].material() as rayTraceTypescript.materials.Dielectric
+        assertEquals(1.52f, glass.ri)
+        assertEquals(0.2f, glass.tintDistance)
+        // 0.2 through it leaves the tint itself, 0.4 its square, nothing through it all the light.
+        val once = glass.transmitted(0.2f)
+        assertEquals(0.5f, once.g, 1e-5f)
+        val twice = glass.transmitted(0.4f)
+        assertEquals(0.81f, twice.r, 1e-5f)
+        assertEquals(0.01f, twice.b, 1e-5f)
+        assertEquals(1.0f, glass.transmitted(0f).b, 1e-6f)
+        // Clear glass stays clear.
+        Files.writeString(obj.resolveSibling("amber.mtl"), "newmtl amber\nd 0\nTf 1 1 1\n")
+        assertEquals(null, (MeshLoader.load(obj).palette[0].material() as rayTraceTypescript.materials.Dielectric).tint)
+    }
+
+    @Test
     fun `an obj without a material library has no colours`() {
         val obj = write("plain.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl robe\nf 1 2 3\n")
         assertTrue(!MeshLoader.load(obj).hasColours)

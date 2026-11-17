@@ -13,7 +13,7 @@ data class GpuPick(val device: GpuDevice, val engine: Engine, val fallback: Bool
 
 /**
  * Which card renders, and with which engine: what -Drt.gpu and -Drt.backend say. One card traces;
- * a second one, if there is one, may denoise ([GpuRenderer.optixDenoiserCard]).
+ * the same card denoises ([GpuRenderer.requestedDenoiser]); any other card in the machine stays unused.
  *
  * [gpu] is empty for the best card - the one OptiX can use, else the newest architecture - or a
  * card's number in the driver's list, or a piece of its name (`2060`, `1`).

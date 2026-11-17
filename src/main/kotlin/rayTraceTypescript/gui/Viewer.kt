@@ -8,6 +8,7 @@ import rayTraceTypescript.Vector
 import rayTraceTypescript.gpu.GpuRenderer
 import rayTraceTypescript.gpu.GpuSession
 import rayTraceTypescript.gpu.SceneFlattener
+import rayTraceTypescript.gpu.PlacedMesh
 import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.objects.HittableList
 import rayTraceTypescript.objects.MeshLoader
@@ -52,6 +53,7 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
 import kotlin.math.asin
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -60,7 +62,7 @@ import kotlin.math.tan
 
 /**
  * An interactive window onto a scene, steered like a 3D modelling program:
- *  - left drag orbits the camera around the point it looks at,
+ *  - left drag orbits the camera around the point it looks at, a plain left click selects the object under it,
  *  - Shift + left drag, or middle drag, pans,
  *  - the wheel, or right drag, moves the camera in and out,
  *  - Ctrl + left click stands the selected object on the floor under the cursor,
@@ -127,7 +129,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
      */
     @Volatile var raytrace = System.getProperty("rt.gui.raytrace") != null
 
-    /** The card tracing and its engine, and what denoises, for the panel: "RTX 2060 (OptiX) · odszumia OptiX (GTX 1070)". */
+    /** The card tracing and its engine, and what denoises, for the panel: "RTX 2060 (OptiX) · odszumia OptiX". */
     @Volatile var gpusInUse = ""
         private set
 
@@ -153,6 +155,10 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     val walls: List<WallObject> = scene.parts.filter { it.isSurface }.map { WallObject(it) }.filter { it.editable }
     val lights: List<BuiltInObject> get() = builtIns.filter { it.part.isLight }
     @Volatile var selected: SceneEntry? = null
+        set(value) {
+            field = value
+            panel.repaint()
+        }
     /** The selection when it is an added object - the only kind with a size and a material. */
     val selectedModel: PlacedObject? get() = selected as? PlacedObject
     /** The selection when it can be moved: an added object, or one of the scene's own. */
@@ -648,16 +654,23 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
      * The room and the parts of the scene switched on, where they now stand - everything but the
      * added models - leaving out [except] (the part being dragged, so it does not land on itself).
      */
-    private fun sceneWithoutModels(except: SceneEntry? = null): Hittable {
+    private fun sceneWithoutModels(except: SceneEntry? = null, skipMeshes: Boolean = false): Hittable {
+        val parts = mutableListOf<Hittable>(room())
+        walls.forEach { parts += it.hittable() }
+        builtIns.filter { it.enabled && it !== except }.forEach { b ->
+            val h = b.hittable()
+            if (!(skipMeshes && h is PlacedMesh)) parts += h
+        }
+        return HittableList(parts)
+    }
+
+    /** The scene without any of its parts: what is neither a wall, an object nor a light of it. */
+    private fun room(): Hittable {
         val world = scene.world
         val all = builtIns.map { it.part.hittable } + walls.map { it.part.hittable }
-        val room = if (world is HittableList && all.isNotEmpty()) {
+        return if (world is HittableList && all.isNotEmpty()) {
             HittableList(world.objects.filter { o -> all.none { it === o } }.toMutableList())
         } else world
-        val parts = mutableListOf<Hittable>(room)
-        walls.forEach { parts += it.hittable() }
-        builtIns.filter { it.enabled && it !== except }.forEach { parts += it.hittable() }
-        return HittableList(parts)
     }
 
     /**
@@ -699,7 +712,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                             capacity = pixels
                         }
                     }
-                    // Which card traces, and how, shows in the panel.
+                    // Which card traces and denoises, and with what, shows in the panel.
                     val inUse = next.device + (denoiser?.let { " · odszumia ${it.name}" } ?: "")
                     gpusInUse = inUse
                     SwingUtilities.invokeLater { if (::controls.isInitialized) controls.showGpus(inUse) }
@@ -1095,6 +1108,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             // Keep what the camera looks at in focus when there is depth of field.
             focusDistance = if (base.defocusAngle > 0f) view.radius.toFloat() else base.focusDistance
             background = base.background
+            environment = base.environment
             lights = base.lights
             fireflyClamp = base.fireflyClamp
         }
@@ -1150,10 +1164,25 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             Point(origin[0].toFloat(), origin[1].toFloat(), origin[2].toFloat()),
             Vector(direction[0].toFloat(), direction[1].toFloat(), direction[2].toFloat())
         )
-        sceneWithoutModels(except = model).hit(ray, Interval(0.001f, Float.POSITIVE_INFINITY))?.let { hit ->
+        // A placed mesh of the scene (Yennefer) is hit through its box: its triangle tree for the
+        // CPU takes seconds to build, and each mouse move would build it again on the UI thread.
+        sceneWithoutModels(except = model, skipMeshes = true).hit(ray, Interval(0.001f, Float.POSITIVE_INFINITY))?.let { hit ->
             bestT = hit.t.toDouble()
             val length = sqrt(hit.normal.x * hit.normal.x + hit.normal.y * hit.normal.y + hit.normal.z * hit.normal.z)
             if (length > 0) normal = doubleArrayOf((hit.normal.x / length).toDouble(), (hit.normal.y / length).toDouble(), (hit.normal.z / length).toDouble())
+        }
+        for (part in builtIns) {
+            if (!part.enabled || part === model) continue
+            val h = part.hittable() as? PlacedMesh ?: continue
+            val box = h.aabbBoundingBox()
+            val min = doubleArrayOf(box.x.min.toDouble(), box.y.min.toDouble(), box.z.min.toDouble())
+            val max = doubleArrayOf(box.x.max.toDouble(), box.y.max.toDouble(), box.z.max.toDouble())
+            boxHit(origin, direction, min, max)?.let { (t, faceNormal) ->
+                if (t < bestT) {
+                    bestT = t
+                    normal = faceNormal
+                }
+            }
         }
         for (other in objects) {
             if (other === model) continue
@@ -1231,17 +1260,14 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         panel.repaint()
     }
 
-    /** Linear values times [scale] -> sRGB-ish 8 bit, the same sqrt gamma and clamp as the files. */
+    /** Linear values times [scale] -> 8 bit, through the same [ToneMap] as the files. */
     private fun toImage(linear: FloatArray, width: Int, height: Int, scale: Float): BufferedImage {
         val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
         val out = (image.raster.dataBuffer as DataBufferInt).data
+        val tone = rayTraceTypescript.render.ToneMap.current()
         for (pixel in 0 until width * height) {
             var rgb = 0
-            for (channel in 0 until 3) {
-                val value = linear[pixel * 3 + channel] * scale
-                val gamma = if (value > 0f) sqrt(value).coerceAtMost(0.999f) else 0f
-                rgb = (rgb shl 8) or (256f * gamma).toInt()
-            }
+            for (channel in 0 until 3) rgb = (rgb shl 8) or tone.byte(linear[pixel * 3 + channel] * scale)
             out[pixel] = rgb
         }
         return image
@@ -1254,11 +1280,18 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             private var lastX = 0
             private var lastY = 0
             private var placing = false
+            private var pressX = 0
+            private var pressY = 0
+            /** Whether the pointer left the press point, which makes the press a drag, not a click. */
+            private var moved = false
 
             override fun mousePressed(e: MouseEvent) {
                 panel.requestFocusInWindow()
                 lastX = e.x
                 lastY = e.y
+                pressX = e.x
+                pressY = e.y
+                moved = false
                 placing = SwingUtilities.isLeftMouseButton(e) && e.isControlDown && selectedMovable != null
                 if (placing) {
                     updateGhost(e.x, e.y)
@@ -1277,6 +1310,8 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                 }
                 dragging = false
                 touch()
+                // A plain left click, with the pointer where it went down, picks what is under it.
+                if (!moved && SwingUtilities.isLeftMouseButton(e) && !e.isShiftDown && !e.isControlDown) pickAt(e.x, e.y)
             }
 
             override fun mouseDragged(e: MouseEvent) {
@@ -1284,6 +1319,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                     updateGhost(e.x, e.y)
                     return
                 }
+                if (!moved && abs(e.x - pressX) + abs(e.y - pressY) > CLICK_SLOP) moved = true
                 val dx = e.x - lastX
                 val dy = e.y - lastY
                 lastX = e.x
@@ -1345,6 +1381,40 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             else -> return false
         }
         return true
+    }
+
+    /**
+     * A click on the image: selects the object it lands on - an added one or one of the scene's
+     * own, never a light or a wall - the nearest along the ray and not behind the room's own
+     * surfaces; a click on nothing clears the selection. The panel's list follows.
+     */
+    private fun pickAt(mouseX: Int, mouseY: Int) {
+        val r = panel.imageBounds()
+        if (r.width <= 0 || r.height <= 0) return
+        val fx = (mouseX - r.x).toDouble() / r.width
+        val fy = (mouseY - r.y).toDouble() / r.height
+        if (fx !in 0.0..1.0 || fy !in 0.0..1.0) return
+        val (origin, direction) = cursorRay(view, fx, fy)
+        val ray = Ray(
+            Point(origin[0].toFloat(), origin[1].toFloat(), origin[2].toFloat()),
+            Vector(direction[0].toFloat(), direction[1].toFloat(), direction[2].toFloat())
+        )
+        val interval = Interval(0.001f, Float.POSITIVE_INFINITY)
+
+        fun distance(h: Hittable): Float? =
+            if (h is PlacedMesh) h.pick(ray) else h.hit(ray, interval)?.t
+
+        // Walls and the rest of the room hide what stands behind them.
+        val roomT = (walls.map { it.hittable() } + room()).mapNotNull { distance(it) }.minOrNull() ?: Float.POSITIVE_INFINITY
+        var best: SceneEntry? = null
+        var bestT = roomT
+        for (o in objects) distance(o.hittable())?.let { if (it < bestT) { bestT = it; best = o } }
+        for (b in builtIns) {
+            if (!b.enabled || b.part.isLight) continue
+            distance(b.hittable())?.let { if (it < bestT) { bestT = it; best = b } }
+        }
+        selected = best
+        controls.refreshObjects()
     }
 
     /** Ctrl + drag: where the selected model would land, shown as its box until the button is let go. */
@@ -1438,8 +1508,14 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
 
         /** The dragged model's box, where it would land, drawn over the image in perspective. */
         private fun drawGhost(g2: Graphics2D) {
-            val at = ghost ?: return
             val model = selectedMovable ?: return
+            val at = ghost
+            // No box to drop: the selection is outlined where it stands, thinner and dashed.
+            if (at == null) drawBox(g2, model, doubleArrayOf(model.x, model.y, model.z), dashed = true) else drawBox(g2, model, at, dashed = false)
+        }
+
+        /** [model]'s box standing at [at], drawn over the image in perspective. */
+        private fun drawBox(g2: Graphics2D, model: Movable, at: DoubleArray, dashed: Boolean) {
             val b = model.localBounds()
             val s = setup(view, resolution)
             val r = imageBounds()
@@ -1458,7 +1534,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
             }
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
             g2.color = Theme.accent
-            g2.stroke = BasicStroke(1.6f)
+            g2.stroke = if (dashed) BasicStroke(1.2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, floatArrayOf(6f, 5f), 0f) else BasicStroke(1.6f)
             // The 12 edges: corners that differ in exactly one of the three bits.
             for (i in 0 until 8) for (bit in intArrayOf(1, 2, 4)) {
                 val j = i or bit
@@ -1516,8 +1592,10 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         private const val TURN_STEP = 15.0
         /** A surface counts as one to stand on when its normal is within ~45 degrees of up. */
         private const val UPWARD = 0.7
+        /** How far the pointer may stray, in pixels, between press and release for the press to still be a click. */
+        private const val CLICK_SLOP = 4
         private const val HELP =
-            "LPM obrót · Shift+LPM przesuń · kółko zoom · Ctrl+LPM postaw · T tryb · S zapis · F1 skróty"
+            "LPM obrót · klik zaznacz · Shift+LPM przesuń · kółko zoom · Ctrl+LPM postaw · T tryb · S zapis · F1 skróty"
     }
 }
 

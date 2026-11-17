@@ -48,6 +48,13 @@ interface GpuSession : AutoCloseable {
      */
     fun launch(mode: Int, setup: CameraSetup, sampleStart: Int, count: Int, scale: Float, target: Int = IMAGE)
 
+    /**
+     * The most samples one launch in [mode] should take: with caustics, each image launch has a
+     * photon map of its own, and many small launches - many maps - converge where a few big ones
+     * would not ([CausticMap.samplesPerLaunch]).
+     */
+    fun samplesPerLaunch(mode: Int, setup: CameraSetup): Int = Int.MAX_VALUE
+
     /** Copies the first [into].size floats of [target] back to the host. */
     fun read(target: Int, into: FloatArray)
 
@@ -82,7 +89,7 @@ interface GpuSession : AutoCloseable {
         var done = 0
         var slice = 1
         while (done < samples) {
-            val count = minOf(slice, samples - done)
+            val count = minOf(slice, samples - done, samplesPerLaunch(mode, setup))
             val launchStart = System.nanoTime()
             launch(mode, setup, done, count, 1.0f / samples, target)
             val launchMs = maxOf((System.nanoTime() - launchStart) / 1_000_000.0, 1.0)
@@ -108,10 +115,15 @@ interface GpuSession : AutoCloseable {
          * OptiX it slowed the image by more than both passes take.)
          */
         const val MODE_GUIDES = 4
-        internal val MODE_NAMES = listOf("image", "albedo guide", "normal guide", "shaded preview", "guides")
+        /** The photon pass of caustics ([CausticMap]): a thread a photon, from the lights through the casters. */
+        internal const val MODE_PHOTONS = 5
+        internal val MODE_NAMES = listOf("image", "albedo guide", "normal guide", "shaded preview", "guides", "photon")
 
         /** The kernel's AOV_MODE for [mode], and whether it writes the normal guide beside it. */
         internal fun aovMode(mode: Int): Int = if (mode == MODE_GUIDES) MODE_ALBEDO else mode
+
+        /** Whether [mode]'s kernel is built with caustics: the image gathers the map the photon pass makes. */
+        internal fun withCaustics(mode: Int, causticsOn: Boolean): Boolean = causticsOn && (mode == MODE_IMAGE || mode == MODE_PHOTONS)
         internal fun gathersGuides(mode: Int): Boolean = mode == MODE_GUIDES
 
         /**

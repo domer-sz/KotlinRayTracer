@@ -11,6 +11,7 @@ import rayTraceTypescript.gpu.FrameTurn
 import rayTraceTypescript.gpu.Engine
 import rayTraceTypescript.gpu.GpuDevice
 import rayTraceTypescript.gpu.GpuKeepAwake
+import rayTraceTypescript.gpu.EnvironmentOnCard
 import rayTraceTypescript.gpu.GpuPick
 import rayTraceTypescript.gpu.GpuRenderer
 import rayTraceTypescript.gpu.GpuScene
@@ -41,6 +42,7 @@ import java.util.IdentityHashMap
 internal class OptixSession(initial: GpuScene, private val maxPixels: Int, device: GpuDevice) : GpuSession {
     private val keepAwake = GpuKeepAwake.startIfUseful()
     private val cuda = CudaContext.create(device)
+    private val environment = EnvironmentOnCard()
     override val device: String = GpuPick(device, Engine.OPTIX).toString()
     override var seed: Long = GpuSession.initialSeed()
 
@@ -70,12 +72,16 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
     private var outputs: List<Long> = emptyList()
 
     /** A placed mesh on this card: its triangles as loaded, its faces' palette entries, and its tree. */
-    private class BlockOnCard(val vertices: Long, val faces: Long, val normals: Long, val tree: OptixAccel.Tree)
+    private class BlockOnCard(val vertices: Long, val faces: Long, val normals: Long, val uvs: Long, val tree: OptixAccel.Tree)
     private val blocks = IdentityHashMap<MeshBlock, BlockOnCard>()
 
     private var scene: InstancedScene = initial.instanced
     /** The feature switches the pipelines were built with. */
     private var defines = definesFor(scene)
+    /** Caustics by photon mapping (-Drt.caustics), and whether the scene has casters and lights for them. */
+    private val caustics: rayTraceTypescript.gpu.CausticMap? =
+        if (rayTraceTypescript.gpu.CausticMap.enabled) rayTraceTypescript.gpu.CausticMap(cuda).also { it.prepare(scene) } else null
+    private var causticsOn = caustics?.active == true
     private var sceneArguments: List<Long> = emptyList()
     private var loose: OptixAccel.Tree? = null
     private var top: OptixAccel.Tree? = null
@@ -113,10 +119,13 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         releaseScene()
         scene = next.instanced
         load(scene)
+        caustics?.prepare(scene)
         val nextDefines = definesFor(scene)
-        if (nextDefines != defines) {
+        val nextCaustics = caustics?.active == true
+        if (nextDefines != defines || nextCaustics != causticsOn) {
             releasePipelines()
             defines = nextDefines
+            causticsOn = nextCaustics
         }
     }
 
@@ -129,28 +138,47 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         CudaContext.check(cuMemcpyHtoD(cameraBuffer, staging), "cuMemcpyHtoD(camera)")
     }
 
+    override fun samplesPerLaunch(mode: Int, setup: CameraSetup): Int =
+        if (mode == GpuSession.MODE_IMAGE && causticsOn) caustics!!.samplesPerLaunch(setup) else Int.MAX_VALUE
+
     override fun launch(mode: Int, setup: CameraSetup, sampleStart: Int, count: Int, scale: Float, target: Int) {
         cuda.makeCurrent()
+        if (mode == GpuSession.MODE_IMAGE && causticsOn) {
+            // The launch's photon map first: shot, landed, sorted into the grid.
+            val photons = caustics!!.begin(setup, sampleStart, count)
+            run(GpuSession.MODE_PHOTONS, setup, photons, 1, sampleStart, count, scale, target)
+            caustics.buildGrid(photons)
+        }
+        run(mode, setup, setup.imageWidth, setup.imageHeight, sampleStart, count, scale, target)
+    }
+
+    /** One launch of [mode]'s pipeline over a [width] x [height] "image": pixels, or photons in a row. */
+    private fun run(mode: Int, setup: CameraSetup, width: Int, height: Int, sampleStart: Int, count: Int, scale: Float, target: Int) {
         val pipeline = pipeline(mode)
         // The kernel's Params: pointers and 64-bit numbers first, then the 32-bit ones.
         paramsHost.clear()
         sceneArguments.forEach { paramsHost.putLong(it) }
+        val map = setup.environment
         paramsHost.putLong(outputs[target]).putLong(outputs[GpuSession.NORMAL]).putLong(outputs[GpuSession.FLOW]).putLong(quadIds).putLong(sphereIds).putLong(instanceTable).putLong(palette)
+            .putLong(environment.bufferFor(map))
+            .putLong(if (GpuSession.withCaustics(mode, causticsOn)) caustics!!.params else 0L)
             .putLong(top!!.handle).putLong(seed)
         // The root node is the CUDA kernel's: OptiX searches its own trees.
-        paramsHost.putInt(setup.imageWidth).putInt(setup.imageHeight).putInt(sampleStart).putInt(count)
+        paramsHost.putInt(width).putInt(height).putInt(sampleStart).putInt(count)
             .putInt(setup.maxReflectionDepth).putFloat(scale).putInt(0).putInt(scene.lightCount).putInt(quadInput)
             .putFloat(if (mode == GpuSession.MODE_IMAGE) setup.fireflyClamp else 0f).putInt(scene.mediumCount)
         // The turn that takes a turning mesh back a frame: the frame's turn, undone.
         val back = Math.toRadians(-(turn?.degrees ?: 0f).toDouble())
         paramsHost.putFloat(kotlin.math.cos(back).toFloat()).putFloat(kotlin.math.sin(back).toFloat())
             .putFloat(turn?.axisX ?: 0f).putFloat(turn?.axisZ ?: 0f)
+        paramsHost.putInt(map?.width ?: 0).putInt(map?.height ?: 0).putFloat(map?.intensity ?: 0f)
+            .putFloat(Math.toRadians((map?.turnDegrees ?: 0f).toDouble()).toFloat())
         check(paramsHost.position() == PARAMS_BYTES - PARAMS_PADDING) { "Params is ${paramsHost.position()} bytes, the kernel expects ${PARAMS_BYTES - PARAMS_PADDING}" }
         DeviceMemory.write(paramsBuffer, paramsHost)
 
         OptixApi.call(
             "optixLaunch", pipeline.pipeline, 0L, paramsBuffer, PARAMS_BYTES.toLong(), pipeline.sbt.address,
-            setup.imageWidth, setup.imageHeight, 1
+            width, height, 1
         )
         CudaContext.check(cuCtxSynchronize(), "OptiX launch (cuCtxSynchronize)")
     }
@@ -167,6 +195,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         try {
             cuda.makeCurrent()
             releasePipelines()
+            caustics?.close()
             releaseScene()
             blocks.values.forEach { release(it) }
             blocks.clear()
@@ -177,6 +206,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             MemoryUtil.memFree(paramsHost)
             stagingMemory.free()
             cuda.close()
+            environment.close()
             keepAwake?.close()
         }
     }
@@ -269,7 +299,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             s.instances.forEach { instance ->
                 val onCard = blocks.getValue(instance.block)
                 val own = instance.palette ?: IntArray(0)
-                table.putLong(onCard.vertices).putLong(if (own.isEmpty()) 0L else onCard.faces).putLong(onCard.normals)
+                table.putLong(onCard.vertices).putLong(if (own.isEmpty()) 0L else onCard.faces).putLong(onCard.normals).putLong(onCard.uvs)
                     .putInt(instance.material).putInt(paletteEntries.size).putInt(own.size)
                     .putFloat(instance.cos).putFloat(instance.sin).putInt(if (instance.turning) 1 else 0)
                 own.forEach { paletteEntries += it }
@@ -325,20 +355,24 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         val vertices = DeviceMemory.upload(mesh.vertices)
         var faces = 0L
         var normals = 0L
+        var uvs = 0L
         try {
             faces = mesh.faceMaterials?.takeIf { mesh.hasColours }?.let { DeviceMemory.upload(it) } ?: 0L
             // A smooth mesh's corner normals, in the same order and in its own space.
             normals = if (mesh.smooth) DeviceMemory.upload(mesh.smoothNormals) else 0L
+            // Its texture coordinates, in the same order, when the file gave any.
+            uvs = mesh.uvs?.let { DeviceMemory.upload(it) } ?: 0L
             val tree = accel.trianglesOnCard(listOf(vertices to block.triangleCount))
             System.err.println(
                 "[gpu] built the tree of a ${block.triangleCount}-triangle mesh on ${cuda.deviceName} (OptiX) in " +
                     "${(System.nanoTime() - start) / 1_000_000} ms, ${tree.bytes / (1 shl 20)} MB" + if (mesh.smooth) ", shaded smooth" else ""
             )
-            return BlockOnCard(vertices, faces, normals, tree)
+            return BlockOnCard(vertices, faces, normals, uvs, tree)
         } catch (t: Throwable) {
             DeviceMemory.free(vertices)
             DeviceMemory.free(faces)
             DeviceMemory.free(normals)
+            DeviceMemory.free(uvs)
             throw t
         }
     }
@@ -348,6 +382,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         DeviceMemory.free(block.vertices)
         DeviceMemory.free(block.faces)
         DeviceMemory.free(block.normals)
+        DeviceMemory.free(block.uvs)
     }
 
     private fun releaseScene() {
@@ -367,7 +402,10 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         // -Drt.cuda.options adds compiler flags for experiments, space separated.
         val extra = System.getProperty("rt.cuda.options")?.split(' ')?.filter { it.isNotBlank() } ?: emptyList()
         val options = BUILD_OPTIONS + defines.split(' ').filter { it.isNotBlank() } +
-            listOf("-DAOV_MODE=${GpuSession.aovMode(mode)}", "-DGUIDES=${if (GpuSession.gathersGuides(mode)) 1 else 0}", "-DRT_OPTIX=1", OptixApi.includeOption()) + extra
+            listOf(
+                "-DAOV_MODE=${GpuSession.aovMode(mode)}", "-DGUIDES=${if (GpuSession.gathersGuides(mode)) 1 else 0}",
+                "-DCAUSTICS=${if (GpuSession.withCaustics(mode, causticsOn)) 1 else 0}", "-DRT_OPTIX=1", OptixApi.includeOption()
+            ) + extra
         val program = cuda.buildOptixProgram(GpuRenderer.cudaKernelSource(), options)
         val compiled = System.nanoTime()
         // Spheres take a program group of their own, and OptiX must be told it meets primitives
@@ -515,11 +553,11 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             else -> null
         }
 
-        /** The kernel's Params: 30 pointers and 64-bit numbers, then 15 numbers of 32 bits, padded to a multiple of 8 as the compiler pads it. */
+        /** The kernel's Params: 32 pointers and 64-bit numbers, then 19 numbers of 32 bits, padded to a multiple of 8 as the compiler pads it. */
         private const val PARAMS_PADDING = 4
-        private const val PARAMS_BYTES = 30 * 8 + 15 * 4 + PARAMS_PADDING
-        /** The kernel's Instance: three pointers, then six numbers of 32 bits. */
-        private const val INSTANCE_BYTES = 3 * 8 + 6 * 4
+        private const val PARAMS_BYTES = 32 * 8 + 19 * 4 + PARAMS_PADDING
+        /** The kernel's Instance: four pointers, then six numbers of 32 bits. */
+        private const val INSTANCE_BYTES = 4 * 8 + 6 * 4
         /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance (and with moving spheres, the ray's time, which it is handed). */
         private const val PAYLOAD_VALUES = 6
         private const val GROUPS = 4

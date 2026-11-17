@@ -24,7 +24,9 @@ data class CameraSetup(
     val defocusDiscU: Vector,
     val defocusDiscV: Vector,
     /** The brightest a sample may be, 0 for no limit (see Camera.fireflyClamp). */
-    val fireflyClamp: Float = 0.0f
+    val fireflyClamp: Float = 0.0f,
+    /** Where escaping rays take their colour from, instead of [background] or the gradient (see Camera.environment). */
+    val environment: rayTraceTypescript.textures.Environment? = null
 ) {
     val totalPixels: Int get() = imageWidth * imageHeight
 

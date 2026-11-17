@@ -24,6 +24,9 @@ class Camera {
     /** Colour of rays that escape the scene; null keeps the sky gradient of the first book. */
     var background: Color? = null
 
+    /** An HDR map round the scene that escaping rays take their colour from; it overrides [background]. */
+    var environment: rayTraceTypescript.textures.Environment? = null
+
     /**
      * Shapes worth aiming samples at - the lights. Given them, every diffuse bounce sends half
      * its samples straight at a light, which is what clears the noise out of a dim room.
@@ -98,7 +101,8 @@ class Camera {
             lights = lights,
             defocusDiscU = u * defocusRadius,
             defocusDiscV = v * defocusRadius,
-            fireflyClamp = fireflyClamp
+            fireflyClamp = fireflyClamp,
+            environment = environment
         )
     }
 

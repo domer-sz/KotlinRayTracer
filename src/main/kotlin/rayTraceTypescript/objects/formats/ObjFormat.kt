@@ -8,8 +8,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * Wavefront OBJ: `v` vertices and `f` faces, with the texture and normal parts of a face corner
- * ignored. Faces may be polygons and may index vertices from the end with negative numbers.
+ * Wavefront OBJ: `v` vertices, `vt` texture coordinates and `f` faces, with the normal part of a
+ * face corner ignored. Faces may be polygons and may index from the end with negative numbers.
  *
  * When the file names a material library (`mtllib`) found beside it, `usemtl` gives the faces
  * after it that material; see [MtlFormat] for what of a material is read.
@@ -18,6 +18,7 @@ internal object ObjFormat {
 
     fun parse(bytes: ByteArray, folder: Path? = null): Mesh {
         val positions = FloatList()
+        val texCoords = FloatList()
         val builder = MeshBuilder()
         val library = LinkedHashMap<String, MeshMaterial>()
         val palette = ArrayList<MeshMaterial>()
@@ -32,15 +33,21 @@ internal object ObjFormat {
                     require(parts.size >= 4) { "Vertex needs three coordinates: '$line'" }
                     positions.add(parts[1].toFloat(), parts[2].toFloat(), parts[3].toFloat())
                 }
+                "vt" -> {
+                    require(parts.size >= 2) { "Texture coordinate needs u: '$line'" }
+                    texCoords.add(parts[1].toFloat())
+                    texCoords.add(parts.getOrNull(2)?.toFloatOrNull() ?: 0.0f)
+                }
                 "f" -> {
                     val corners = parts.drop(1)
                     if (corners.size >= 3) {
-                        builder.polygon(positions, IntArray(corners.size) { resolve(corners[it], positions.tripleCount) })
+                        val uvIndices = if (texCoords.size == 0) null else IntArray(corners.size) { textureIndex(corners[it], texCoords.size / 2) }
+                        builder.polygon(positions, IntArray(corners.size) { resolve(corners[it], positions.tripleCount) }, texCoords, uvIndices)
                     }
                 }
                 "mtllib" -> if (folder != null) {
                     val file = folder.resolve(line.substringAfter("mtllib").trim())
-                    if (Files.isRegularFile(file)) MtlFormat.parse(Files.readAllBytes(file)).forEach { library[it.name] = it }
+                    if (Files.isRegularFile(file)) MtlFormat.parse(Files.readAllBytes(file), file.parent).forEach { library[it.name] = it }
                 }
                 "usemtl" -> {
                     val material = library[line.substringAfter("usemtl").trim()]
@@ -62,16 +69,23 @@ internal object ObjFormat {
             ?: throw IllegalArgumentException("Malformed face corner '$corner'")
         return if (index > 0) index - 1 else vertexCount + index
     }
+
+    /** `f 1/2/3` - the texture coordinate's index, -1 when the corner names none. */
+    private fun textureIndex(corner: String, count: Int): Int {
+        val index = corner.split('/').getOrNull(1)?.toIntOrNull() ?: return -1
+        return if (index > 0) index - 1 else count + index
+    }
 }
 
 /**
  * A Wavefront material library (.mtl), read for what this renderer can draw: `Kd` the colour
- * (linear), the PBR extension's `Pm` metallic and `Pr` roughness, `Ke` light given off, and
- * `d` (or `Tr`) with `Ni` for glass.
+ * (linear), the PBR extension's `Pm` metallic and `Pr` roughness, `Ke` light given off,
+ * `d` (or `Tr`) with `Ni` for glass, and `map_Kd`, an image for the colour, found beside the
+ * library ([folder]).
  */
 internal object MtlFormat {
 
-    fun parse(bytes: ByteArray): List<MeshMaterial> {
+    fun parse(bytes: ByteArray, folder: Path? = null): List<MeshMaterial> {
         val materials = ArrayList<MeshMaterial>()
         var name: String? = null
         var kd = Color(0.8f, 0.8f, 0.8f)
@@ -80,8 +94,14 @@ internal object MtlFormat {
         var ke: Color? = null
         var d = 1.0f
         var ni = 1.5f
+        var mapKd: Path? = null
+        var mapPr: Path? = null
+        var mapKe: Path? = null
+        var norm: Path? = null
+        var tf: Color? = null
+        var tfDistance = 1.0f
         fun finish() {
-            name?.let { materials += MeshMaterial(it, kd, pm, pr, ke, d, ni) }
+            name?.let { materials += MeshMaterial(it, kd, pm, pr, ke, d, ni, mapKd, mapPr, mapKe, norm, tf, tfDistance) }
         }
         val whitespace = Regex("\\s+")
         bytes.toString(StandardCharsets.UTF_8).lineSequence().forEach { rawLine ->
@@ -94,7 +114,7 @@ internal object MtlFormat {
                 "newmtl" -> {
                     finish()
                     name = line.substringAfter("newmtl").trim()
-                    kd = Color(0.8f, 0.8f, 0.8f); pm = 0.0f; pr = 0.0f; ke = null; d = 1.0f; ni = 1.5f
+                    kd = Color(0.8f, 0.8f, 0.8f); pm = 0.0f; pr = 0.0f; ke = null; d = 1.0f; ni = 1.5f; mapKd = null; mapPr = null; mapKe = null; norm = null; tf = null; tfDistance = 1.0f
                 }
                 "Kd" -> kd = colour()
                 "Pm" -> pm = f(1)
@@ -103,6 +123,14 @@ internal object MtlFormat {
                 "d" -> d = f(1)
                 "Tr" -> d = 1.0f - f(1)
                 "Ni" -> ni = f(1)
+                // Glass coloured through its body: what is left after a distance through it - one
+                // model unit, or the fourth number (not in the format, which has no distance).
+                "Tf" -> if (p.size >= 4) { tf = colour(); tfDistance = p.getOrNull(4)?.toFloatOrNull()?.takeIf { it > 0f } ?: 1.0f }
+                // Options (-bm 1, -s ...) come before the file name, which is last.
+                "map_Kd" -> mapKd = folder?.resolve(p.last())?.takeIf { Files.isRegularFile(it) }
+                "map_Pr" -> mapPr = folder?.resolve(p.last())?.takeIf { Files.isRegularFile(it) }
+                "map_Ke" -> mapKe = folder?.resolve(p.last())?.takeIf { Files.isRegularFile(it) }
+                "norm", "map_Bump", "bump" -> folder?.resolve(p.last())?.takeIf { Files.isRegularFile(it) }?.let { norm = it }
             }
         }
         finish()
