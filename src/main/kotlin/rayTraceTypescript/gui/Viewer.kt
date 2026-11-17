@@ -153,8 +153,9 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     @Volatile private var dragging = false
     @Volatile private var running = true
     @Volatile private var saveRequested = false
-    // OIDN runs on the CPU, so it can work while the GPU keeps sampling; and turning the buffer
-    // into a picture needs no GPU either. One thread each, so their results come in order.
+    // The denoiser works on its own card, or beside the sampling on the same one, while the GPU
+    // keeps sampling; turning the buffer into a picture needs no GPU at all. One thread each, so
+    // their results come in order.
     private val denoiseExecutor = Executors.newSingleThreadExecutor { Thread(it, "viewer-denoise").apply { isDaemon = true } }
     private val displayExecutor = Executors.newSingleThreadExecutor { Thread(it, "viewer-display").apply { isDaemon = true } }
     /** Denoises the frames in motion, one after another, while the GPU traces the next. */
@@ -415,8 +416,11 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
     fun filmTurning(): List<Movable> = selectedMovable?.let { listOf(it) }
         ?: objects.toList().ifEmpty { builtIns.filter { !it.part.isLight && it.enabled } }
 
-    /** Whether frames would be denoised: the D switch, and the OIDN library being there. */
-    fun filmDenoised(): Boolean = denoiseOn && rayTraceTypescript.render.Denoiser.folder() != null
+    /** Whether frames would be denoised: the D switch, and an OptiX denoiser having started. */
+    fun filmDenoised(): Boolean = denoiseOn && denoiserReady
+
+    /** Set once the render thread has a denoiser. */
+    @Volatile private var denoiserReady = false
 
     /** Hands [job] to the render thread; it reports through its listener. */
     fun startFilm(job: FilmJob) {
@@ -697,8 +701,9 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         try {
             // The viewer denoises its own images at their size: no enlarging (-Drt.upscale) here.
             GpuRenderer.requestedDenoiser(allowUpscale = false).use { denoiser ->
-                // The card kept for denoising is the one the denoiser actually started on: if
-                // OptiX gave way to OIDN, no card sits out of the tracing for it.
+                denoiserReady = denoiser != null
+                // The card kept for denoising is the one the denoiser actually started on: if it
+                // did not start, no card sits out of the tracing for it.
                 gpuChoice = gpuChoice.copy(denoising = (denoiser as? rayTraceTypescript.gpu.optix.OptixDenoiser)?.device)
                 val open = { pixels: Int ->
                     val start = System.nanoTime()
@@ -1056,7 +1061,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         val image = if (clean != null) toImage(clean, s.imageWidth, s.imageHeight, 1.0f)
         else toImage(noisy, s.imageWidth, s.imageHeight, 1.0f / samples)
         val denoiseNote = when {
-            !hasDenoiser -> "bez odszumiania (brak OIDN)"
+            !hasDenoiser -> "bez odszumiania (brak OptiX)"
             !denoiseOn -> "odszumianie wył."
             clean != null && done -> "odszumione, gotowe"
             clean != null -> "odszumione"

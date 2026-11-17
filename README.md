@@ -1,19 +1,21 @@
 # Kotlin Ray Tracer
 
 Path tracer z książek *Ray Tracing in One Weekend* / *The Next Week* / *The Rest of Your Life*,
-napisany w Kotlinie, liczony na GPU przez CUDA, z odszumianiem Intel Open Image Denoise
+napisany w Kotlinie, liczony na GPU przez CUDA i OptiX, z odszumianiem OptiX (NVIDIA)
 i interaktywnym oknem podglądu.
 
 ## Wymagania
 
-- **Windows x64** – biblioteki odszumiacza, kompilator kernela (NVRTC) i okno trzymające zegary GPU
-  są przygotowane tylko pod Windows.
+- **Windows x64** – kompilator kernela (NVRTC) i okno trzymające zegary GPU są przygotowane tylko
+  pod Windows.
 - **Karta NVIDIA z CUDA** – testowane na GTX 1070 (Pascal, sm_61) ze sterownikiem 577. Kompilator
   kernela (NVRTC) jest w `native/cuda`, więc CUDA Toolkit nie jest potrzebny. Bez karty NVIDIA renderer
   nie działa (nie ma już trybu CPU ani OpenCL).
 - **JDK 17 lub nowszy** (testowane na Temurin 21) i **Maven**.
 
-Nic więcej nie trzeba instalować: odszumiacz OIDN jest w repozytorium (`native/oidn/windows-x64`).
+- **Nagłówki OptiX 9.0** – licencja NVIDII nie pozwala ich trzymać w repozytorium; pobiera je
+  `powershell -File native/optix/fetch.ps1` (szczegóły w `native/optix/README.md`). Bez nich renderer liczy
+  własnym kernelem CUDA i nie odszumia. Bibliotekę OptiX (`nvoptix.dll`) instaluje sterownik.
 
 ## Uruchomienie interfejsu graficznego
 
@@ -152,6 +154,7 @@ materiały, światła – opisuje `AGENTS.md`.
 - **Czarne okno albo „GPU rendering unavailable”** – brak karty NVIDIA z CUDA albo sterownika; zaktualizuj
   sterownik karty. „NVRTC not found” – uruchomiono spoza katalogu repozytorium; wskaż `native/cuda/windows-x64`
   przez `-Drt.nvrtc=<ścieżka>`.
-- **„bez odszumiania (brak OIDN)” w pasku stanu** – brakuje `native/oidn/windows-x64`
-  (np. uruchomiono spoza katalogu repozytorium); wskaż go przez `-Drt.oidn=<ścieżka>`.
+- **„bez odszumiania (brak OptiX)” w pasku stanu** – brakuje nagłówków OptiX (uruchom
+  `native/optix/fetch.ps1`) albo uruchomiono spoza katalogu repozytorium (wskaż je przez
+  `-Drt.optix.include=<ścieżka>`); log mówi, czego brakuje.
 - **OutOfMemoryError przy dużym modelu** – zwiększ `MAVEN_OPTS` (`-Xmx12g` lub więcej).

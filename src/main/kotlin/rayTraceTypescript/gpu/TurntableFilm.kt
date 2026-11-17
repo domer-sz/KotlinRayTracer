@@ -93,8 +93,8 @@ internal class FrameTiming {
  *
  * Each frame is traced in slices of about [SLICE_MS] (well inside the display driver's two
  * second watchdog even when a hot card drops its clock), followed by the denoiser's guides; then
- * the CPU denoises it and writes it to the film while the GPU already traces the next frame -
- * OIDN runs on the CPU, so the two overlap. Only one frame waits at a time, which keeps the
+ * a worker denoises it and writes it to the film while the GPU already traces the next frame.
+ * Only one frame waits at a time, which keeps the
  * order and the memory bounded. Every frame gets its own seed.
  */
 object TurntableFilm {
