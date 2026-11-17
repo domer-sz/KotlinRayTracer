@@ -7,8 +7,8 @@ description: Render a ray traced turntable film (MP4) of a model with KoltinRayT
 
 The film comes from the renderer itself: `-Drt.turntable=<file.mp4>` on any scene turns the
 scene's objects (its parts that are neither lights nor walls) about the middle of their
-footprint, one frame per step, denoises each frame (OptiX on the second card by default, OIDN on
-the CPU with `-Drt.denoiser=oidn`) and pipes it to ffmpeg. What the
+footprint, one frame per step, denoises each frame with OptiX (traced at half size and enlarged by the denoiser on the RTX
+2060 by default; at full size, `-Drt.upscale=off`, the GTX 1070 denoises) and pipes it to ffmpeg. What the
 code does and why: `AGENTS.md`, section *Turntable Films*.
 
 ## Before starting
@@ -162,12 +162,12 @@ that day, and a denoised still at angle 0 now sits 31.8 dB / SSIM 0.914 from v4'
     frame (trace 140 ms, guides 22 ms; denoising 71 ms beside it), ~1.4 min for 450 frames; frame 0
     sits 29.1 dB from the full-size film's, softer in the face and lacing. The default since 2026-11-16 (the user chose it);
     `-Drt.upscale=off` renders at full size;
-  - `-Drt.denoiser=oidn` (as all films before this day): 1.51 s a frame, of it 893 ms waiting for
-    OIDN on the CPU (1447 ms a frame);
+  - with Intel OIDN on the CPU, as all films before this day (removed 2026-11-17): 1.51 s a
+    frame, of it 893 ms waiting for OIDN (1447 ms a frame);
   - `-Drt.denoiser.gpu=2060` (the RTX does both): 0.56 s a frame.
 - The OptiX denoiser looks like OIDN, a touch sharper in folds and faces: against a 4096-spp still
   it scores 34.0 dB PSNR, OIDN 33.3 dB. Films published before 2026-11-15 were denoised by OIDN;
-  `-Drt.denoiser=oidn` renders a film that matches them.
+  a film that matches them takes a checkout of v1.1.0 or older with `-Drt.denoiser=oidn`.
 
 ## Measured (GTX 1070 alone, before the RTX 2060; Yennefer, 1080x1920, 64 spp)
 
