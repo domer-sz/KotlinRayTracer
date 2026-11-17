@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.0.0 - 2026-11-18
+
+- Caustics by photon mapping (`-Drt.caustics=on`, off by default): a photon pass in both engines
+  shoots photons from the lights through glass and polished metal, the card sorts them into a
+  hashed grid, and camera paths gather them at the first matte surface they meet while the path
+  tracer gives up the light they carry. At equal time the caustics come out clean where brute
+  force is still specks (the fluted tumbler: 1024 spp in 12.5 s against 2048 spp of noise in
+  8.4 s), the firefly clamp can stay on, and the floor under a glass slab matches brute force
+  within 6 % on both engines.
+- Models from files keep their look: texture coordinates and `map_Kd` images, physically based
+  metal (GGX, Schlick Fresnel, Smith shadowing, `map_Pr` roughness), `map_Ke` glow, normal maps,
+  and glass coloured through its body (`Tf`, Beer-Lambert). Amazon Lumberyard Bistro (2.83 M
+  triangles, 132 textures) renders at 1920x1080 and 256 spp in 5.3 s; Sun Temple with its own
+  skybox.
+- `-Drt.scene=file` renders a whole scene from one file under a sun, with lamps from a `.lights`
+  file beside it (their radius settable), an HDR sky (`-Drt.env`, Radiance .hdr) and camera flags;
+  every output goes through a tone map (`-Drt.tonemap=aces`, `-Drt.exposure`).
+- `-Drt.flythrough` films the camera along key positions (Catmull-Rom, constant speed, eased);
+  Sun Temple's 15 s at 60 fps took 0.81 s a frame.
+- Films can be denoised with OptiX's temporal model (`-Drt.temporal=on`) along a flow guide for
+  turning meshes, and the viewer renders in motion as a film does: 16 spp, temporal upscaling,
+  10-12 frames a second on Yennefer at 1080x1920. Stills and films trace at half size by default.
+- The viewer picks a model by clicking it, and moving one no longer freezes it (a CPU tree of
+  every mesh was rebuilt on each mouse move); `gui.cmd` opens it in a few keystrokes.
+- OptiX traces spheres (custom primitives) and fog too, so it takes every scene the CUDA kernel
+  does.
+- Removed: Open Image Denoise (OptiX denoises, or nothing does; `-Drt.denoiser`, `-Drt.oidn`),
+  sharing one image between cards (`-Drt.gpus` becomes `-Drt.gpu=<card>`; one card traces and
+  denoises, the GTX 1070 is no longer used), the compiler experiment switches, `-Drt.stl` and the
+  numbered scenes.
+- Publishing skills from StlViewer: Instagram, YouTube and a TikTok draft in one go
+  (`publish-film`), TikTok alone (`publish-tiktok`).
+
 ## v1.1.0 - 2026-11-16
 
 - `-Drt.upscale=2`: stills and films trace at half the width and height and OptiX's UPSCALE2X
