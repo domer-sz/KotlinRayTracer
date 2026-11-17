@@ -34,12 +34,6 @@ class BookScenesTest {
     }
 
     @Test
-    fun `the old numeric scene names still work`() {
-        assertTrue(BookScenes.byName("1").name == "bouncing-spheres")
-        assertTrue(BookScenes.byName("2").name == "earth")
-    }
-
-    @Test
     fun `an unknown scene lists what is available`() {
         val failure = assertThrows(IllegalArgumentException::class.java) { BookScenes.byName("nope") }
         assertTrue(failure.message!!.contains("cornell-box"), failure.message)

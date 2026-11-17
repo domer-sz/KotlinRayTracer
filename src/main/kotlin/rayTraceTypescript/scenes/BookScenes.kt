@@ -52,12 +52,7 @@ object BookScenes {
     val names: List<String> get() = scenes.keys.toList()
 
     fun byName(name: String): SceneDefinition {
-        val key = when (name.trim().lowercase()) {
-            "1" -> "bouncing-spheres"
-            "2" -> "earth"
-            "3" -> "model"
-            else -> name.trim().lowercase()
-        }
+        val key = name.trim().lowercase()
         val builder = scenes[key]
             ?: throw IllegalArgumentException("Unknown scene '$name'; available: ${names.joinToString()}")
         return builder()
@@ -548,11 +543,7 @@ object BookScenes {
      * -Drt.model=<path>, the MODEL_FILE environment variable, or ./model.stl.
      */
     fun model(
-        path: String = System.getProperty("rt.model")
-            ?: System.getProperty("rt.stl")
-            ?: System.getenv("MODEL_FILE")
-            ?: System.getenv("STL_FILE")
-            ?: "model.stl",
+        path: String = System.getProperty("rt.model") ?: System.getenv("MODEL_FILE") ?: "model.stl",
         material: Material = Lambertian(Color(0.72f, 0.38f, 0.22f))
     ) = SceneDefinition(
         name = "model",
