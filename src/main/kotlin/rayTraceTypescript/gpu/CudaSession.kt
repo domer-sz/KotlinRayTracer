@@ -108,7 +108,7 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
             // One thread per pixel, a warp of 32 covering an 8x4 tile: neighbouring rays stay
             // together on their first bounces, where they diverge least.
             val tiles = ((setup.imageWidth + 7) / 8).toLong() * ((setup.imageHeight + 3) / 4)
-            val block = (System.getProperty("rt.cuda.block")?.toIntOrNull() ?: BLOCK_SIZE)
+            val block = BLOCK_SIZE
             val grid = ((tiles * 32 + block - 1) / block).toInt()
             CudaContext.check(cuLaunchKernel(function, grid, 1, 1, block, 1, 1, 0, 0L, params, null), "cuLaunchKernel")
             CudaContext.check(cuCtxSynchronize(), "kernel (cuCtxSynchronize)")

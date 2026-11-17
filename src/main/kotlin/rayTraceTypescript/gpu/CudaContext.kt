@@ -63,8 +63,7 @@ class CudaContext private constructor(
      */
     fun buildKernel(source: String, options: List<String>, entry: String = "render"): Pair<Long, Long> {
         val supported = supportedArchitectures()
-        // -Drt.cuda.ptx hands the driver PTX to finish instead of a ready cubin.
-        val native = computeCapability in supported && System.getProperty("rt.cuda.ptx") == null
+        val native = computeCapability in supported
         val arch = if (native) "--gpu-architecture=sm_$computeCapability"
         else "--gpu-architecture=compute_${supported.filter { it <= computeCapability }.maxOrNull() ?: supported.min()}"
         return compile(source, listOf(arch) + options) { program ->
@@ -79,11 +78,6 @@ class CudaContext private constructor(
                     MemoryUtil.memAlloc(size.get(0).toInt()).also { checkNvrtc(nvrtcGetPTX(program, it), "nvrtcGetPTX") }
                 }
                 try {
-                    // -Drt.cuda.dump=<file> keeps what NVRTC produced, for reading PTX.
-                    System.getProperty("rt.cuda.dump")?.let { path ->
-                        val bytes = ByteArray(image.remaining()).also { image.duplicate().get(it) }
-                        java.nio.file.Files.write(java.nio.file.Paths.get(path), bytes)
-                    }
                     val module = stack.mallocPointer(1)
                     // PTX is finished by the driver's compiler, which needs the register cap again.
                     val cap = options.firstOrNull { it.startsWith("--maxrregcount=") }?.substringAfter('=')?.toLongOrNull()
@@ -106,21 +100,15 @@ class CudaContext private constructor(
 
     /**
      * Compiles [source] with [options] into OptiX IR, the form OptiX takes its programs in; the
-     * driver finishes it for the card. With [ptx] it is PTX instead, the older form OptiX also
-     * reads. The caller frees the buffer.
+     * driver finishes it for the card. The caller frees the buffer.
      */
-    fun buildOptixProgram(source: String, options: List<String>, ptx: Boolean = false): ByteBuffer =
-        compile(source, if (ptx) options else options + "--optix-ir") { program ->
+    fun buildOptixProgram(source: String, options: List<String>): ByteBuffer =
+        compile(source, options + "--optix-ir") { program ->
             MemoryStack.stackPush().use { stack ->
                 val size = stack.mallocPointer(1)
-                if (ptx) {
-                    checkNvrtc(nvrtcGetPTXSize(program, size), "nvrtcGetPTXSize")
-                    MemoryUtil.memAlloc(size.get(0).toInt()).also { checkNvrtc(nvrtcGetPTX(program, it), "nvrtcGetPTX") }
-                } else {
-                    checkNvrtc(nvrtcGetOptiXIRSize(program, size), "nvrtcGetOptiXIRSize")
-                    if (size.get(0) == 0L) throw CudaException("NVRTC produced no OptiX IR for these options")
-                    MemoryUtil.memAlloc(size.get(0).toInt()).also { checkNvrtc(nvrtcGetOptiXIR(program, it), "nvrtcGetOptiXIR") }
-                }
+                checkNvrtc(nvrtcGetOptiXIRSize(program, size), "nvrtcGetOptiXIRSize")
+                if (size.get(0) == 0L) throw CudaException("NVRTC produced no OptiX IR for these options")
+                MemoryUtil.memAlloc(size.get(0).toInt()).also { checkNvrtc(nvrtcGetOptiXIR(program, it), "nvrtcGetOptiXIR") }
             }
         }
 

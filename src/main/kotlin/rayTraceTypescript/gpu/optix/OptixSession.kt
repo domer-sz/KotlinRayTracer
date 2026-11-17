@@ -368,8 +368,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         val extra = System.getProperty("rt.cuda.options")?.split(' ')?.filter { it.isNotBlank() } ?: emptyList()
         val options = BUILD_OPTIONS + defines.split(' ').filter { it.isNotBlank() } +
             listOf("-DAOV_MODE=${GpuSession.aovMode(mode)}", "-DGUIDES=${if (GpuSession.gathersGuides(mode)) 1 else 0}", "-DRT_OPTIX=1", OptixApi.includeOption()) + extra
-        // -Drt.optix.ptx hands OptiX PTX, the older form, instead of OptiX IR.
-        val program = cuda.buildOptixProgram(GpuRenderer.cudaKernelSource(), options, ptx = System.getProperty("rt.optix.ptx") != null)
+        val program = cuda.buildOptixProgram(GpuRenderer.cudaKernelSource(), options)
         val compiled = System.nanoTime()
         // Spheres take a program group of their own, and OptiX must be told it meets primitives
         // other than triangles; a scene without them keeps the pipeline it always had.

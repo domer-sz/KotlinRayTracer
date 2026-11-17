@@ -29,20 +29,14 @@ class GpuRenderer : Renderer {
         val denoiser = requestedDenoiser()
         // A denoiser that enlarges twice (-Drt.upscale=2) is handed a half-size image: the raw
         // render is written at that size, the denoised one at the full.
-        val traced = if (denoiser?.upscale == 2 && System.getProperty("rt.aov") == null) setup.halved() else setup
+        val traced = if (denoiser?.upscale == 2) setup.halved() else setup
 
         GpuSession.open(scene, traced.totalPixels).use { session ->
             session.setCamera(traced)
-            // -Drt.aov=albedo|normal renders a denoiser guide instead of the image.
-            val mainMode = when (System.getProperty("rt.aov")) {
-                "albedo" -> GpuSession.MODE_ALBEDO
-                "normal" -> GpuSession.MODE_NORMAL
-                else -> GpuSession.MODE_IMAGE
-            }
-            val pixels = renderAll(session, traced, mainMode, setup.samplesPerPixel, GpuSession.IMAGE)
+            val pixels = renderAll(session, traced, GpuSession.MODE_IMAGE, setup.samplesPerPixel, GpuSession.IMAGE)
             PpmWriter.write(outputPath, traced.imageWidth, traced.imageHeight, pixels)
 
-            if (denoiser != null && mainMode == GpuSession.MODE_IMAGE) {
+            if (denoiser != null) {
                 denoiser.use {
                     // The guides only see the first hit, so a few hundred samples leave them
                     // clean; the denoiser needs them antialiased like the image, not more.
@@ -50,17 +44,12 @@ class GpuRenderer : Renderer {
                     val start = System.nanoTime()
                     val (albedo, normal) = renderGuides(session, traced, guideSamples)
                     System.err.println("[gpu] guides: ${(System.nanoTime() - start) / 1_000_000} ms")
-                    // -Drt.denoise.repeat=N denoises the image N times more, to time a denoiser once it is set up.
-                    val runs = 1 + (System.getProperty("rt.denoise.repeat")?.toIntOrNull() ?: 0).coerceIn(0, 100)
-                    var clean = pixels
-                    repeat(runs) { run ->
-                        val start = System.nanoTime()
-                        clean = it.denoise(traced.imageWidth, traced.imageHeight, pixels, albedo, normal)
-                        val parts = (it as? OptixDenoiser)?.lastTimes?.let { t ->
-                            ": up %.1f ms, denoiser %.1f ms, back %.1f ms, setting up %.1f ms".format(t.uploadMs, t.denoiseMs, t.downloadMs, t.setupMs)
-                        } ?: ""
-                        System.err.println("[gpu] denoised${if (runs > 1) " (${run + 1} of $runs)" else ""} by ${it.name} in ${(System.nanoTime() - start) / 1_000_000} ms$parts")
-                    }
+                    val denoiseStart = System.nanoTime()
+                    val clean = it.denoise(traced.imageWidth, traced.imageHeight, pixels, albedo, normal)
+                    val parts = (it as? OptixDenoiser)?.lastTimes?.let { t ->
+                        ": up %.1f ms, denoiser %.1f ms, back %.1f ms, setting up %.1f ms".format(t.uploadMs, t.denoiseMs, t.downloadMs, t.setupMs)
+                    } ?: ""
+                    System.err.println("[gpu] denoised by ${it.name} in ${(System.nanoTime() - denoiseStart) / 1_000_000} ms$parts")
                     PpmWriter.write(denoisedPath(outputPath), setup.imageWidth, setup.imageHeight, clean)
                 }
             }
