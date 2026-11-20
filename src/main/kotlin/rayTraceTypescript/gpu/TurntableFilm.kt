@@ -19,7 +19,18 @@ data class TurntableSettings(
     /** Clockwise seen from above instead of counter-clockwise. */
     val reverse: Boolean = false,
     /** The smaller file (about 0.085 bits per pixel and frame) rather than the best (0.15). */
-    val compact: Boolean = true
+    val compact: Boolean = true,
+    /**
+     * How far one "turn" goes, in degrees: 360, or less for a figure that looks the same turned
+     * by less - a round brilliant, eight-fold, by 45 - which then loops as seamlessly and slower.
+     */
+    val sweep: Double = 360.0,
+    /**
+     * Swing instead of turn: from 0 out to [sweep], easing in and out (half a cosine), the last
+     * frame at [sweep] itself - the outward half of a swing there and back, whose return is these
+     * frames played backwards (ffmpeg's reverse filter), so only half of it is traced.
+     */
+    val swing: Boolean = false
 ) {
     /** Frames of one turn; the turns after the first are copies of it. */
     val framesPerTurn: Int get() = maxOf(2, Math.round(seconds * fps).toInt())
@@ -28,10 +39,14 @@ data class TurntableSettings(
      * How far the figure has turned at [frame], in degrees: a full turn over the frames, the last
      * frame one step short of the first, so the turn loops without a doubled frame.
      */
-    fun degrees(frame: Int): Float = ((if (reverse) -360.0 else 360.0) * frame / framesPerTurn).toFloat()
+    fun degrees(frame: Int): Float {
+        val signed = if (reverse) -sweep else sweep
+        if (swing) return (signed * (1.0 - kotlin.math.cos(Math.PI * frame / (framesPerTurn - 1))) / 2.0).toFloat()
+        return (signed * frame / framesPerTurn).toFloat()
+    }
 
     companion object {
-        /** Settings from -Drt.turntable.seconds / .turns / .fps / .reverse / .quality and -Drt.samples. */
+        /** Settings from -Drt.turntable.seconds / .turns / .fps / .reverse / .quality / .degrees / .swing and -Drt.samples. */
         fun fromProperties(defaultSamples: Int): TurntableSettings {
             fun prop(name: String) = System.getProperty("rt.turntable.$name")
             return TurntableSettings(
@@ -40,7 +55,9 @@ data class TurntableSettings(
                 fps = prop("fps")?.toIntOrNull()?.coerceIn(1, 120) ?: 30,
                 samples = System.getProperty("rt.samples")?.toIntOrNull() ?: defaultSamples,
                 reverse = prop("reverse")?.let { it != "false" && it != "off" } ?: false,
-                compact = prop("quality") != "max"
+                compact = prop("quality") != "max",
+                sweep = prop("degrees")?.toDoubleOrNull()?.takeIf { it > 0.0 }?.coerceAtMost(360.0) ?: 360.0,
+                swing = prop("swing")?.let { it != "false" && it != "off" } ?: false
             )
         }
     }

@@ -252,6 +252,9 @@ internal class CausticMap(private val cuda: CudaContext) : AutoCloseable {
          * sphere, the loose triangles and quads together - merged, the closest pairs first,
          * until they fit. Built face by face: a model file is one mesh with its floor in it.
          */
+        /** More casting spheres than this share one aim. */
+        private const val SPHERE_CROWD = 64
+
         internal fun aimSpheres(scene: InstancedScene): FloatArray {
             val boxes = mutableListOf<FloatArray>()
             fun box() = floatArrayOf(Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE)
@@ -281,16 +284,20 @@ internal class CausticMap(private val cuda: CudaContext) : AutoCloseable {
                 }
                 if (!b.empty()) boxes += b
             }
-            for (s in scene.sceneSpheres) {
-                if (!mayCast(scene, scene.sphereMaterials[s])) continue
+            // Each casting sphere its own box - but a crowd of them (a model filled with glass beads,
+            // MeshFill) one box together: merging them pair by pair would take n cubed.
+            val casting = scene.sceneSpheres.filter { mayCast(scene, scene.sphereMaterials[it]) }
+            val crowd = if (casting.size > SPHERE_CROWD) box() else null
+            for (s in casting) {
                 val d = scene.spheres; val at = s * SceneBuffers.SPHERE_STRIDE; val r = d[at + 6]
-                val b = box()
+                val b = crowd ?: box()
                 for (moved in 0..1) {
                     val x = d[at] + moved * d[at + 3]; val y = d[at + 1] + moved * d[at + 4]; val z = d[at + 2] + moved * d[at + 5]
                     b.add(x - r, y - r, z - r); b.add(x + r, y + r, z + r)
                 }
-                boxes += b
+                if (crowd == null) boxes += b
             }
+            if (crowd != null) boxes += crowd
             val loose = box()
             for (t in 0 until scene.sceneTriangles) {
                 if (!mayCast(scene, scene.triangleMaterials[t])) continue
