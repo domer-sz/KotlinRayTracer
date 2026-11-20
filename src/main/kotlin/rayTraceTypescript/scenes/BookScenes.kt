@@ -12,6 +12,8 @@ import rayTraceTypescript.materials.Material
 import rayTraceTypescript.objects.BvhNode
 import rayTraceTypescript.objects.HittableList
 import rayTraceTypescript.objects.Hittable
+import rayTraceTypescript.objects.Mesh
+import rayTraceTypescript.objects.MeshFill
 import rayTraceTypescript.objects.MeshLoader
 import rayTraceTypescript.objects.ConstantMedium
 import rayTraceTypescript.objects.Quad
@@ -422,7 +424,7 @@ object BookScenes {
         // The fill light (-Drt.fill) comes with cornellFinal and is aimed at this model's face.
         val world = scene.world as HittableList
         val faces = if (chosen == null) mesh.toColouredHittables(material) else mesh.toHittables(material)
-        val model = BvhNode(HittableList(faces.toMutableList()))
+        val model = filling(mesh, material) ?: BvhNode(HittableList(faces.toMutableList()))
         world.add(model)
         val modelName = java.io.File(path).nameWithoutExtension
         return SceneDefinition(name = "cornell-model", world = world, camera = scene.camera, parts = scene.parts + ScenePart(modelName, model))
@@ -434,6 +436,20 @@ object BookScenes {
      * brightness is set so that it lights that point with [strength] times the light the lamp
      * gives it, going by area, distance and the panels' angles to it.
      */
+    /**
+     * What -Drt.infill puts in place of [mesh] (threads or pyramids packed into it, the
+     * mesh itself left out; see [MeshFill]), in [material] or -Drt.infill.color; null without it.
+     */
+    fun filling(mesh: Mesh, material: Material): Hittable? {
+        val settings = MeshFill.Settings.fromProperties() ?: return null
+        val chosen = MeshFill.Settings.materialOverride() ?: material
+        val filling = MeshFill.fill(mesh, chosen, settings)
+        println(filling.summary)
+        filling.mesh?.let { return rayTraceTypescript.gpu.PlacedMesh(rayTraceTypescript.gpu.MeshBlock(it), 1f, 0f, Vector(0f, 0f, 0f), chosen) }
+        // A tree over the spheres for the CPU's own hit tests (the viewer's picking); the GPU builds its own.
+        return BvhNode(HittableList(filling.spheres!!.toMutableList<Hittable>()))
+    }
+
     private fun fillLight(strength: Float): Quad {
         val target = Vector(360f, 150f, 170f)
         val centre = Vector(330f, 560f, -200f)
@@ -578,7 +594,8 @@ object BookScenes {
         )
         val mesh = MeshLoader.load(path).standingOnFloor()
         println("Loaded ${mesh.triangleCount} triangles from $path")
-        objects.addAll(mesh.toHittables(material))
+        val filling = filling(mesh, material)
+        if (filling != null) objects.add(filling) else objects.addAll(mesh.toHittables(material))
         return HittableList(mutableListOf(BvhNode(HittableList(objects))))
     }
 
@@ -602,26 +619,47 @@ object BookScenes {
         // -0.4 EV on the emitters (lamps and backdrop): everything else only reflects them.
         val exposure = Math.pow(2.0, -0.4).toFloat()
 
-        val gold = Metal(Color(0.9f, 0.7f, 0.3f), 0.05f)
+        // -Drt.studio.material=glass|diamond makes the figure clear (index 1.5, or diamond's 2.42) instead of gold.
+        val gold: Material = when (val chosen = System.getProperty("rt.studio.material")?.trim()?.lowercase()) {
+            null, "", "gold" -> Metal(Color(0.9f, 0.7f, 0.3f), 0.05f)
+            "glass" -> Dielectric(1.5f)
+            "diamond" -> Dielectric(2.42f)
+            else -> throw IllegalArgumentException("-Drt.studio.material=$chosen: expected gold, glass or diamond")
+        }
         val mesh = MeshLoader.load(path).zUpToYUp().rotatedY(turn).standingOnFloor(targetHeight = height)
         println("Loaded ${mesh.triangleCount} triangles from $path")
         // A placed mesh: its tree is built once, so turning it (the viewer, a turntable film)
         // copies that tree in instead of building it again.
-        val figure = rayTraceTypescript.gpu.PlacedMesh(rayTraceTypescript.gpu.MeshBlock(mesh), 1f, 0f, Vector(0f, 0f, 0f), gold)
+        // -Drt.infill: what fills the figure stands in for it (MeshFill).
+        val figure: Hittable = filling(mesh, gold)
+            ?: rayTraceTypescript.gpu.PlacedMesh(rayTraceTypescript.gpu.MeshBlock(mesh), 1f, 0f, Vector(0f, 0f, 0f), gold)
 
         // Floor, wall, lamps and camera exactly as StlViewer dumped them for this figure at
         // angle 0 (renders/yenn-scene-dump.json there): the camera stands 45 degrees round the
         // figure, and the wall and lamps are laid out round it.
+        // -Drt.studio.floor=matte[:r,g,b] lays a matte floor (light grey by default) instead of the
+        // black mirror, so caustics have somewhere to land.
+        val floorSetting = System.getProperty("rt.studio.floor")?.trim()?.lowercase()
+        val floorMaterial: Material = when {
+            floorSetting == null || floorSetting == "mirror" -> Metal(Color(0.22f, 0.22f, 0.25f), 0.004f)
+            floorSetting.startsWith("matte") -> {
+                val c = floorSetting.substringAfter(':', "").split(',').mapNotNull { it.trim().toFloatOrNull() }
+                Lambertian(if (c.size == 3) Color(c[0], c[1], c[2]) else Color(0.75f, 0.75f, 0.75f))
+            }
+            else -> throw IllegalArgumentException("-Drt.studio.floor=$floorSetting: expected matte[:r,g,b] or mirror")
+        }
         val floor = Quad(
             Point(-48.6785f, 0f, -48.6785f), Vector(0f, 0f, 97.3571f), Vector(97.3571f, 0f, 0f),
-            Metal(Color(0.22f, 0.22f, 0.25f), 0.004f)
+            floorMaterial
         )
         val wall = Quad(
             Point(37.863f, 64.9047f, -53.9261f), Vector(-91.7891f, 0f, 91.7891f), Vector(0f, -64.9047f, 0f),
             Lambertian(Color(0.009696f, 0.038473f, 0.173439f))
         )
+        // -Drt.studio.softboxes=<k> dims (or brightens) the three softboxes, e.g. under a lamp that should lead.
+        val softboxes = System.getProperty("rt.studio.softboxes")?.toFloatOrNull()?.takeIf { it >= 0f } ?: 1f
         fun softbox(corner: Point, u: Vector, v: Vector, power: Float): Quad {
-            val level = power * exposure
+            val level = power * exposure * softboxes
             return Quad(corner, u, v, DiffuseLight(Color(level, level, level)))
         }
         val key = softbox(Point(-1.8395f, 4.4035f, -0.3628f), Vector(1.8774f, 0f, 2.2374f), Vector(-1.7139f, -1.8774f, 1.4382f), 8f)
@@ -632,7 +670,49 @@ object BookScenes {
         val eye = Point(2.3622f, 1.3017f, 2.3613f)
         val sky = Color(0.000805f, 0.002263f, 0.010398f) * exposure
 
-        val world = HittableList(mutableListOf(floor, wall, key, fill, rim, figure))
+        // -Drt.studio.wall=off takes the navy wall away: only the dark sky behind.
+        val withWall = System.getProperty("rt.studio.wall")?.trim()?.lowercase() != "off"
+        // With -Drt.studio.softboxes=0 they are left out altogether, not aimed at for nothing.
+        val boxes = if (softboxes > 0f) listOf(key, fill, rim) else emptyList()
+        val world = HittableList((listOf(floor) + (if (withWall) listOf(wall) else emptyList()) + boxes + figure).toMutableList())
+        val lamps = boxes.toMutableList<Hittable>()
+        // -Drt.studio.lamp=x,y,z[,irradiance[,radius]]: a small glowing ball, hard light for sharp
+        // shadows and caustics. Its brightness is given as the light it casts on the figure's middle
+        // (4 by default, about twice the key softbox), its radius 0.04 by default.
+        System.getProperty("rt.studio.lamp")?.let { setting ->
+            val n = setting.split(',').mapNotNull { it.trim().toFloatOrNull() }
+            require(n.size >= 3) { "-Drt.studio.lamp=$setting: expected x,y,z[,irradiance[,radius]]" }
+            val at = Point(n[0], n[1], n[2])
+            val irradiance = n.getOrNull(3) ?: 4f
+            val radius = n.getOrNull(4) ?: 0.04f
+            val middle = Point(0f, height * 0.5f, 0f)
+            val d2 = (at - middle).let { it.x * it.x + it.y * it.y + it.z * it.z }
+            // A ball of radiance L, radius r, seen from d away, lights a facing point with L pi r^2 / d^2.
+            val radiance = irradiance * d2 / (Math.PI.toFloat() * radius * radius)
+            val lamp = Sphere(at, radius, DiffuseLight(Color(radiance, radiance, radiance)))
+            world.add(lamp)
+            lamps.add(lamp)
+            // -Drt.studio.lamp.cone=<degrees>: a black shade round the lamp, open towards the figure,
+            // so it lights a pool of that half-angle and the rest stays dark (a tube of 16 panels
+            // and a back, its rim three lamp radii out).
+            System.getProperty("rt.studio.lamp.cone")?.toFloatOrNull()?.takeIf { it in 1f..80f }?.let { cone ->
+                val axis = (middle - at).unit()
+                val side = Vector.cross(if (kotlin.math.abs(axis.y) < 0.9f) Vector(0f, 1f, 0f) else Vector(1f, 0f, 0f), axis).unit()
+                val up = Vector.cross(axis, side)
+                val rim = 3f * radius
+                val ahead = rim / kotlin.math.tan(Math.toRadians(cone.toDouble())).toFloat()
+                val back = (at - axis * (rim * 0.5f)).toPoint()
+                val black = Lambertian(Color(0.02f, 0.02f, 0.02f))
+                fun ring(k: Int): Point {
+                    val phi = 2.0 * Math.PI * k / 16
+                    return (back + side * (rim * kotlin.math.cos(phi).toFloat()) + up * (rim * kotlin.math.sin(phi).toFloat())).toPoint()
+                }
+                for (k in 0 until 16) world.add(Quad(ring(k), ring(k + 1) - ring(k), axis * (ahead + rim * 0.5f), black))
+                world.add(Quad((back - side * rim - up * rim).toPoint(), side * (2f * rim), up * (2f * rim), black))
+                println("  under a shade: a pool of %.0f degrees".format(cone))
+            }
+            println("Studio lamp at (%.2f, %.2f, %.2f), radius %.3f, %.1f on the figure".format(at.x, at.y, at.z, radius, irradiance))
+        }
         System.getProperty("rt.studio.fog")?.toFloatOrNull()?.takeIf { it > 0f }?.let { density ->
             // A ball round the figure: by default one taking in the room, camera and lamps too, so it
             // has no edge in sight. Grey: it scatters every colour alike.
@@ -650,14 +730,20 @@ object BookScenes {
                 samplesPerPixel = 64
                 maxReflectionDepth = 8
                 background = sky
-                vfov = 45.0f
-                lookFrom = eye
-                lookAt = target
+                // -Drt.camera.from=x,y,z, -Drt.camera.at=x,y,z, -Drt.camera.vfov=<degrees> place the
+                // camera elsewhere (focused on the point it looks at).
+                fun point(property: String): Point? = System.getProperty(property)?.split(",")
+                    ?.mapNotNull { it.trim().toFloatOrNull() }?.takeIf { it.size == 3 }?.let { Point(it[0], it[1], it[2]) }
+                val from = point("rt.camera.from") ?: eye
+                val at = point("rt.camera.at") ?: target
+                vfov = System.getProperty("rt.camera.vfov")?.toFloatOrNull() ?: 45.0f
+                lookFrom = from
+                lookAt = at
                 vUp = Vector(0f, 1f, 0f)
                 // 0.4 degrees of aperture, focused on the figure's axis.
                 defocusAngle = 0.4f
-                focusDistance = 3.3883f
-                lights = HittableList(mutableListOf(key, fill, rim))
+                focusDistance = if (from === eye && at === target) 3.3883f else (at - from).length()
+                lights = HittableList(lamps)
                 // StlViewer caps a sample at 16 before its exposure; here the exposure is in the
                 // lamps already, so the same cap is 16 times as much.
                 fireflyClamp = Camera.DEFAULT_FIREFLY_CLAMP * exposure
