@@ -1,6 +1,6 @@
 ---
 name: crp
-description: Commit, release, push - ship the current work of KoltinRayTracer in one go - commit what is pending, run the tests, bump the version (pom.xml + CHANGELOG.md), tag vX.Y.Z, push the branch and the tag, merge into the default branch (main - the user's "master") and push it, then publish the release. Use when the user says "crp", "/crp", "zrób release", "wydaj wersję", "commit release push", "wypuść", "zmerguj na mastera/maina", or asks to tag and publish the work.
+description: Commit, release, push - ship the current work of KoltinRayTracer in one go - commit what is pending, run the tests, bump the version (pom.xml + CHANGELOG.md), tag vX.Y.Z, push the branch and the tag, merge into the default branch (main - the user's "master") and push it - the pushed tag is the release. Use when the user says "crp", "/crp", "zrób release", "wydaj wersję", "commit release push", "wypuść", "zmerguj na mastera/maina", or asks to tag and publish the work.
 ---
 
 # CRP: commit, release, push
@@ -102,20 +102,17 @@ git switch <branch>            # back where the work happens
   `git push origin <branch>:main` after checking `git merge-base --is-ancestor origin/main <branch>`
   (a fast-forward on the remote), or report it.
 
-## 6. Publish the release
+## 6. The tag is the release
 
-- With the GitHub CLI (`gh --version` works and `gh auth status` is logged in):
-  `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <the changelog section>`.
-- Without it (the case on this machine as of 2026-11-02) the pushed annotated tag is the
-  release; give the user the link to turn it into a GitHub Release by hand:
-  `https://github.com/domer-sz/KotlinRayTracer/releases/new?tag=vX.Y.Z`.
-  (The repository was renamed from `KoltinRayTracer`; `origin` points at the new name since
-  2026-11-02, the old one still redirects.)
+The pushed annotated tag `vX.Y.Z`, with the changelog section as its message, is the release -
+the user's decision (2026-11-18). Do not create a GitHub Release (no `gh release create`) and do
+not hand the user a link to make one by hand. (The repository was renamed from
+`KoltinRayTracer`; `origin` points at the new name since 2026-11-02, the old one still
+redirects.)
 
 ## 7. Report
 
 One short block: the version and why that bump, the commits that went in
 (`git log --oneline <previous tag>..vX.Y.Z`), test results (and whether the GPU tests ran),
-that the branch, the tag and `main` are pushed (fast-forward or merge commit), and the release
-link. If any step stopped the run, say which, what state is left (e.g. tag pushed, `main` not
+and that the branch, the tag and `main` are pushed (fast-forward or merge commit). If any step stopped the run, say which, what state is left (e.g. tag pushed, `main` not
 merged) and what is needed to finish.
