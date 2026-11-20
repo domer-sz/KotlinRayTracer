@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.1.0 - 2026-11-21
+
+- Viewer objects take a surface form: a loaded model, the ball and the block can each turn into a
+  sponge, pyramids or diamonds from the panel's *Forma powierzchni* box. The converted mesh is
+  built once on its own thread and then placed, moved and resized like any model; the form and
+  the pores' spacing are saved in the .rtscene.
+- Sponge conversion (`-Drt.infill=sponge`): the model's surface becomes a soft, thick foam of
+  round uneven holes beside each other, built by the Blender recipe (Voronoi cells, inset holes,
+  solidify, smoothing) as a distance field, matched side by side against a reference photo
+  (a 0.5 x 0.5 patch: 89 s, 8.5 M triangles).
+- Model infills (`-Drt.infill=threads|pyramids|diamonds`): the model is left out and filled with
+  swirling bead chains of many thicknesses, or packed pyramids or round brilliants in 7 sizes;
+  `-Drt.infill.material=glass` and `.ior` make them glass or diamond.
+- Dark-studio options for caustic shots in `studio-model`: a matte floor, a lamp with a cone,
+  dimmable or no softboxes, no wall, a camera override and a glass or diamond figure
+  (`-Drt.studio.floor|lamp|lamp.cone|softboxes|wall|material`, `-Drt.camera.from|at|vfov`).
+- Turntables can turn by less than a full turn (`-Drt.turntable.degrees`) and swing out to that
+  angle with easing (`-Drt.turntable.swing=on`), so a there-and-back loop costs half the frames.
+- Caustics with tens of thousands of casting spheres (glass beads) start at once: more than 64
+  share one aim sphere instead of being merged pair by pair.
+
 ## v2.0.0 - 2026-11-18
 
 - Caustics by photon mapping (`-Drt.caustics=on`, off by default): a photon pass in both engines
