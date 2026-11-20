@@ -19,7 +19,10 @@ class SavedObject(
     val zUp: Boolean,
     val material: MaterialSpec,
     /** Made of the materials its file names rather than [material]. */
-    val fileColours: Boolean = false
+    val fileColours: Boolean = false,
+    /** What its surface is turned into, and the sponge's hole spacing. */
+    val form: Form = Form.SOLID,
+    val latticePitch: Double = 0.035
 )
 
 /** One of the scene's own objects or lights: whether it is in, and where it stands (null: where the scene put it). */
@@ -123,6 +126,10 @@ object SceneFile {
             lines += "$p.colour=${o.material.red},${o.material.green},${o.material.blue}"
             lines += "$p.parameter=${o.material.parameter}"
             if (o.fileColours) lines += "$p.fileColours=true"
+            if (o.form != Form.SOLID) {
+                lines += "$p.form=${o.form.name}"
+                lines += "$p.lattice=${o.latticePitch}"
+            }
         }
         file.absoluteFile.parentFile?.mkdirs()
         file.writeText(lines.joinToString("\n", postfix = "\n"), Charsets.UTF_8)
@@ -180,7 +187,10 @@ object SceneFile {
                 depth = number("$o.depth"),
                 zUp = text("$o.zUp").toBoolean(),
                 material = MaterialSpec(kind, colour[0].toFloat(), colour[1].toFloat(), colour[2].toFloat(), number("$o.parameter")),
-                fileColours = p.getProperty("$o.fileColours")?.toBoolean() ?: false
+                fileColours = p.getProperty("$o.fileColours")?.toBoolean() ?: false,
+                // A file without a form (an older one) holds solids; so does one with the honeycomb, removed.
+                form = Form.values().firstOrNull { it.name == p.getProperty("$o.form") } ?: Form.SOLID,
+                latticePitch = p.getProperty("$o.lattice")?.split(',')?.getOrNull(0)?.toDoubleOrNull() ?: 0.035
             )
             i++
         }

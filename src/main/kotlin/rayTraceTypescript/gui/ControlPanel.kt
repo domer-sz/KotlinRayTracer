@@ -142,11 +142,13 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
     private val parameterLabel = JLabel("Parametr")
     private val parameter = JSpinner(SpinnerNumberModel(0.0, 0.0, 100.0, 0.05))
     private val zUp = JCheckBox("Oś Z w górę (pliki do druku 3D)")
+    private val formBox = JComboBox(Form.values())
+    private val latticePitch = JSpinner(SpinnerNumberModel(3.5, 1.0, 15.0, 0.5))
     private val info = JLabel(" ").apply { foreground = Theme.muted }
     /** Fields for anything that can be moved: an added object or one of the scene's own. */
     private val placeFields: List<Component> = listOf(centre, posX, posY, posZ, turn)
     /** Fields only an added object has: its size and what it is made of. */
-    private val modelFields: List<Component> = listOf(size, zUp)
+    private val modelFields: List<Component> = listOf(size, zUp, formBox)
     /** Fields for anything with a material: an added object or a wall. */
     private val materialFields: List<Component> = listOf(materialPreset, materialKind, colour, parameter)
     private val wallReset = JButton("Materiał jak w scenie").apply { isVisible = false }
@@ -224,6 +226,9 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         field("Wysokość", size)
         field("Szerokość", blockWidth)
         field("Głębokość", blockDepth)
+        section("Forma powierzchni")
+        field("Forma", formBox)
+        field("Rozstaw porów [% wys.]", latticePitch)
         section("Materiał")
         field("Gotowy", materialPreset)
         field("Rodzaj", materialKind)
@@ -308,12 +313,33 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
             refreshSelection()
         }
         zUp.addActionListener { edit { o -> o.zUp = zUp.isSelected } }
+        formBox.addActionListener {
+            if (syncing) return@addActionListener
+            val o = viewer.selectedModel ?: return@addActionListener
+            changeForm(o, formBox.selectedItem as Form)
+        }
+        latticePitch.addChangeListener {
+            if (syncing) return@addChangeListener
+            val o = viewer.selectedModel ?: return@addChangeListener
+            o.latticePitch = (latticePitch.value as Double) / 100
+            if (o.form == Form.SPONGE) changeForm(o, o.form)
+        }
         blockWidth.addChangeListener { edit { o -> o.width = blockWidth.value as Double } }
         blockDepth.addChangeListener { edit { o -> o.depth = blockDepth.value as Double } }
         addBall.addActionListener { viewer.addShape(Shape.Ball); refreshObjects() }
         addBlock.addActionListener { viewer.addShape(Shape.Block); refreshObjects() }
         refreshObjects()
         syncMode()
+    }
+
+    /** Turns [o]'s surface into [form]; says so when it cannot (a model too thin for the packing). */
+    private fun changeForm(o: PlacedObject, form: Form) {
+        viewer.setForm(o, form) { error ->
+            if (error != null) {
+                JOptionPane.showMessageDialog(frame, "Nie udało się zrobić formy ${form.label}: $error\nObiekt zostaje bryłą.", "Forma powierzchni", JOptionPane.WARNING_MESSAGE)
+            }
+            refreshSelection()
+        }
     }
 
     /** Moves or turns the selected object - added or the scene's own - unless the panel is filling its fields. */
@@ -461,6 +487,8 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         if (mat != null) showMaterial(mat.material, (mat as? PlacedObject)?.fileColours == true)
         // Only a loaded model can be stood up from z; only a block has its own width and depth.
         zUp.isEnabled = o?.isModel == true
+        formBox.isEnabled = o != null
+        latticePitch.isEnabled = o?.form == Form.SPONGE
         blockWidth.isEnabled = o?.shape == Shape.Block
         blockDepth.isEnabled = o?.shape == Shape.Block
         restore.isEnabled = viewer.builtIns.any { !it.part.isLight && (!it.enabled || it.moved || it.changed) }
@@ -477,6 +505,8 @@ class ControlPanel(private val viewer: Viewer, private val frame: JFrame) : JPan
         } else if (o != null) {
             size.value = o.height
             zUp.isSelected = o.zUp
+            formBox.selectedItem = o.form
+            latticePitch.value = (o.latticePitch * 100).coerceIn(1.0, 15.0)
             blockWidth.value = o.width
             blockDepth.value = o.depth
             info.text = o.description

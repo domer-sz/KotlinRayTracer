@@ -304,6 +304,36 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
         }, "viewer-load").apply { isDaemon = true; start() }
     }
 
+    /**
+     * Turns [o]'s surface into [form] (or back to a solid) off the UI thread: the object keeps showing as
+     * a solid while the converted mesh is built, then the scene is rebuilt with it. [onDone] runs on the
+     * UI thread with an error message, or null.
+     */
+    fun setForm(o: PlacedObject, form: Form, onDone: (String?) -> Unit) {
+        o.form = form
+        if (form == Form.SOLID) {
+            sceneChanged()
+            onDone(null)
+            return
+        }
+        status = "Buduję formę ${form.label} - ${o.name}…"
+        panel.repaint()
+        Thread({
+            try {
+                o.prepareForm()
+                status = ""
+                sceneChanged()
+                SwingUtilities.invokeLater { onDone(null) }
+            } catch (t: Throwable) {
+                // Only if nothing else was chosen meanwhile.
+                if (o.form == form) o.form = Form.SOLID
+                status = ""
+                sceneChanged()
+                SwingUtilities.invokeLater { onDone(t.message ?: t.toString()) }
+            }
+        }, "viewer-form").apply { isDaemon = true; start() }
+    }
+
     /** Takes [entry] out: an added model for good, one of the scene's own until [restoreBuiltIns]. */
     /**
      * Adds a sphere (glass, like the scene's) or a block (white, shaped like the column: twice
@@ -536,7 +566,7 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                     Shape.Ball -> "ball"
                     Shape.Block -> "block"
                 }
-                SavedObject(o.name, shape, o.source, o.x, o.y, o.z, o.rotation, o.height, o.width, o.depth, o.zUp, o.material, o.fileColours)
+                SavedObject(o.name, shape, o.source, o.x, o.y, o.z, o.rotation, o.height, o.width, o.depth, o.zUp, o.material, o.fileColours, o.form, o.latticePitch)
             },
             depth = maxDepth,
             walls = walls.filter { it.changed }.map { SavedWall(it.part.name, it.material) }
@@ -599,7 +629,19 @@ class Viewer(private val scene: SceneDefinition, private val saveFolder: Path) {
                         zUp = o.zUp
                         material = o.material
                         fileColours = o.fileColours && hasFileColours
+                        form = o.form
+                        latticePitch = o.latticePitch
                         prepare()
+                        if (form != Form.SOLID) {
+                            status = "Buduję formę ${form.label} - $name…"
+                            panel.repaint()
+                            try {
+                                prepareForm()
+                            } catch (t: Throwable) {
+                                warnings += "Nie udało się zrobić formy ${form.label} dla $name: ${t.message} - zostaje bryła."
+                                form = Form.SOLID
+                            }
+                        }
                     }
                 }
 

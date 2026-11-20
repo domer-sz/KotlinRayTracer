@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import rayTraceTypescript.gui.Form
 import rayTraceTypescript.gui.MaterialKind
 import rayTraceTypescript.gui.MaterialSpec
 import rayTraceTypescript.gui.SavedObject
@@ -35,7 +36,7 @@ class SceneFileTest {
             ),
             objects = listOf(
                 SavedObject("Ork\\z mieczem", "model", model, 292.0, 0.0, 277.5, 45.0, 145.6, 0.5, 0.5, true,
-                    MaterialSpec(MaterialKind.METAL, 0.9f, 0.7f, 0.3f, 0.05)),
+                    MaterialSpec(MaterialKind.METAL, 0.9f, 0.7f, 0.3f, 0.05), form = Form.SPONGE, latticePitch = 0.05),
                 SavedObject("Kula 1", "ball", null, 100.0, 20.0, 50.0, 0.0, 80.0, 40.0, 40.0, false,
                     MaterialSpec(MaterialKind.GLASS, 1f, 1f, 1f, 1.5))
             ),
@@ -71,8 +72,13 @@ class SceneFileTest {
         assertEquals(listOf(292.0, 0.0, 277.5, 45.0, 145.6), listOf(ork.x, ork.y, ork.z, ork.rotation, ork.height))
         assertTrue(ork.zUp)
         assertEquals(saved.objects[0].material, ork.material)
+        assertEquals(Form.SPONGE, ork.form)
+        assertEquals(0.05, ork.latticePitch)
         assertEquals("ball", read.objects[1].shape)
         assertEquals(null, read.objects[1].file)
         assertEquals(saved.objects[1].material, read.objects[1].material)
+        // A form left at solid writes nothing, and a file without one reads as a solid.
+        assertEquals(Form.SOLID, read.objects[1].form)
+        assertTrue(!file.readText().contains("object.1.form"), file.readText())
     }
 }

@@ -227,6 +227,20 @@ enum class MaterialPreset(val label: String, val spec: MaterialSpec) {
     override fun toString() = label
 }
 
+/**
+ * What an added object's surface is turned into: itself ([SOLID]), a soft sponge of round holes,
+ * or a packing of pyramids or diamonds in its shape. The converted ones are meshes made once
+ * in the object's own proportions, so they are placed, moved and resized like any model.
+ */
+enum class Form(val label: String) {
+    SOLID("Bryła"),
+    SPONGE("Gąbka (okrągłe pory)"),
+    PYRAMIDS("Piramidki"),
+    DIAMONDS("Diamenty");
+
+    override fun toString() = label
+}
+
 /** What an added object is: a loaded model, or one of the shapes the scene's own objects have. */
 sealed interface Shape {
     /** A mesh from a file. */
@@ -256,6 +270,12 @@ class PlacedObject(val name: String, val shape: Shape, val source: java.io.File?
     @Volatile var zUp = false
     @Volatile override var material = MaterialPreset.GREY.spec
 
+    /** What the surface is turned into; the converted mesh is built by [prepareForm], and until it is ready the object shows as a solid. */
+    @Volatile var form = Form.SOLID
+
+    /** The sponge's hole spacing, as a fraction of the object's height. */
+    @Volatile var latticePitch = 0.035
+
     val isModel: Boolean get() = shape is Shape.Model
 
     /** Whether the model's file coloured its faces (an OBJ with a .mtl). */
@@ -272,11 +292,58 @@ class PlacedObject(val name: String, val shape: Shape, val source: java.io.File?
             Shape.Block -> "Graniastosłup"
         }
 
+    /** What a converted mesh was made for: when any of these change it is made again. */
+    private data class FormKey(val form: Form, val zUp: Boolean, val pitch: Double, val width: Double, val depth: Double)
+
+    @Volatile private var builtForm: Pair<FormKey, MeshBlock>? = null
+
+    private fun formKey() = FormKey(
+        form, zUp, latticePitch,
+        // A block's proportions, to a hundredth: its width and depth against its height.
+        if (shape == Shape.Block) Math.round(width / height * 100) / 100.0 else 0.0,
+        if (shape == Shape.Block) Math.round(depth / height * 100) / 100.0 else 0.0
+    )
+
+    /** Whether the converted mesh for the current form is built (always, for a solid). */
+    val formReady: Boolean get() = form == Form.SOLID || builtForm?.first == formKey()
+
+    /**
+     * Builds the converted mesh for the current [form] now, on the calling thread (a sponge takes
+     * seconds to a minute), unless it is built or the form is a solid. Throws what the conversion
+     * throws, such as a model too thin to hold the packing.
+     */
+    fun prepareForm() {
+        if (form == Form.SOLID) return
+        val key = formKey()
+        if (builtForm?.first == key) return
+        val base = when (shape) {
+            is Shape.Model -> if (key.zUp) shape.mesh.zUpToYUp() else shape.mesh
+            Shape.Ball -> rayTraceTypescript.objects.MeshShapes.ball()
+            Shape.Block -> rayTraceTypescript.objects.MeshShapes.box(key.width.toFloat().coerceAtLeast(0.01f), key.depth.toFloat().coerceAtLeast(0.01f))
+        }
+        val converted = when (key.form) {
+            Form.SPONGE -> rayTraceTypescript.objects.LatticeFill.build(
+                base, rayTraceTypescript.objects.LatticeFill.Settings(pitch = key.pitch.toFloat())
+            )
+            Form.PYRAMIDS, Form.DIAMONDS -> rayTraceTypescript.objects.MeshFill.fill(
+                base, Lambertian(Color(1f, 1f, 1f)),
+                rayTraceTypescript.objects.MeshFill.Settings(
+                    if (key.form == Form.PYRAMIDS) rayTraceTypescript.objects.MeshFill.Style.PYRAMIDS else rayTraceTypescript.objects.MeshFill.Style.DIAMONDS
+                )
+            ).mesh!!
+            Form.SOLID -> return
+        }
+        val block = MeshBlock(converted)
+        // Dropped when the object was changed again while this was being built: a later build serves that.
+        if (formKey() == key) builtForm = key to block
+    }
+
     /** The object as the renderer takes it, in its place and made of its material. */
     fun hittable(): Hittable {
         val m = material.material()
+        builtForm?.takeIf { form != Form.SOLID && it.first == formKey() }?.let { return placedMesh(it.second, m) }
         return when (shape) {
-            is Shape.Model -> placedMesh(shape.mesh, m)
+            is Shape.Model -> placedMesh(block(shape.mesh), m)
             Shape.Ball -> Sphere(Point(x.toFloat(), (y + height / 2).toFloat(), z.toFloat()), (height / 2).toFloat(), m)
             Shape.Block -> Translate(
                 RotateY(
@@ -317,8 +384,7 @@ class PlacedObject(val name: String, val shape: Shape, val source: java.io.File?
      * footprint centred on (x, z) and its lowest point at y - but as a transform of the cached
      * [MeshBlock], so moving, turning or resizing it builds no new tree.
      */
-    private fun placedMesh(mesh: Mesh, material: Material): Hittable {
-        val b = block(mesh)
+    private fun placedMesh(b: MeshBlock, material: Material): Hittable {
         val radians = Math.toRadians(rotation)
         val c = kotlin.math.cos(radians).toFloat()
         val s = kotlin.math.sin(radians).toFloat()
@@ -341,7 +407,7 @@ class PlacedObject(val name: String, val shape: Shape, val source: java.io.File?
             y.toFloat() - minY * scale,
             z.toFloat() - (minZ + maxZ) / 2 * scale
         )
-        val palette = if (fileColours && hasFileColours) b.mesh.palette.map { it.material() } else null
+        val palette = if (fileColours && hasFileColours && b.mesh.hasColours) b.mesh.palette.map { it.material() } else null
         return PlacedMesh(b, scale, rotation.toFloat(), offset, material, palette)
     }
 
