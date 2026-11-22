@@ -11,6 +11,7 @@ import rayTraceTypescript.gpu.optix.OptixApi
 import rayTraceTypescript.materials.Dielectric
 import rayTraceTypescript.materials.DiffuseLight
 import rayTraceTypescript.materials.Lambertian
+import rayTraceTypescript.objects.ConstantMedium
 import rayTraceTypescript.objects.HittableList
 import rayTraceTypescript.objects.Quad
 import rayTraceTypescript.objects.Sphere
@@ -22,6 +23,9 @@ import kotlin.math.abs
  * less: under a thick glass slab lit by a small lamp, the floor seen through the slab comes out
  * as bright with the photons as by brute force (which finds the lamp through the glass by chance,
  * so it takes many samples), and the open floor, which no photon reaches, the same either way.
+ * The same with smoke under the slab and a black floor: photons stopped in the smoke past the
+ * glass light it as brute force does (caustic_gather_volume), and the smoke beside the slab, lit
+ * straight from the lamp, is the path tracer's either way.
  */
 class CausticsTest {
 
@@ -34,7 +38,16 @@ class CausticsTest {
         check("optix")
     }
 
-    private fun check(backend: String) {
+    @Test
+    fun `the cuda kernel's photons light smoke under glass as brute force does`() = check("cuda", smoke = true)
+
+    @Test
+    fun `optix's photons light smoke under glass as brute force does`() {
+        assumeTrue(OptixApi.unavailabilityReason() == null, "OptiX is not available")
+        check("optix", smoke = true)
+    }
+
+    private fun check(backend: String, smoke: Boolean = false) {
         val gpu = GpuRenderer.unavailabilityReason()
         assumeTrue(gpu == null, "No CUDA device available: $gpu")
         val setup = Camera().apply {
@@ -49,13 +62,15 @@ class CausticsTest {
             fireflyClamp = 0f
         }.initialize()
         val lamp = Sphere(Point(0.3f, 6.0f, -0.2f), 0.6f, DiffuseLight(Color(30.0f, 30.0f, 30.0f)))
+        val floor = Lambertian(if (smoke) Color(0.0f, 0.0f, 0.0f) else Color(0.6f, 0.6f, 0.6f))
         val world = HittableList(
             mutableListOf(
-                Quad(Point(-8.0f, 0.0f, -8.0f), Vector(16.0f, 0.0f, 0.0f), Vector(0.0f, 0.0f, 16.0f), Lambertian(Color(0.6f, 0.6f, 0.6f))),
+                Quad(Point(-8.0f, 0.0f, -8.0f), Vector(16.0f, 0.0f, 0.0f), Vector(0.0f, 0.0f, 16.0f), floor),
                 box(Point(-1.0f, 0.5f, -1.0f), Point(1.0f, 0.8f, 1.0f), Dielectric(1.5f)),
                 lamp
             )
         )
+        if (smoke) world.add(ConstantMedium(box(Point(-3.0f, 0.05f, -3.0f), Point(3.0f, 0.45f, 3.0f), floor), 1.5f, Color(0.8f, 0.8f, 0.8f)))
         fun render(caustics: Boolean, samples: Int): FloatArray {
             if (caustics) System.setProperty("rt.caustics", "on") else System.clearProperty("rt.caustics")
             try {
@@ -69,7 +84,7 @@ class CausticsTest {
                 System.clearProperty("rt.caustics")
             }
         }
-        val brute = render(false, 8192)
+        val brute = render(false, if (smoke) 32768 else 8192)
         val photons = render(true, 512)
 
         // The floor seen through the slab - the middle of the picture - and seen open, at the corners.
@@ -83,14 +98,16 @@ class CausticsTest {
         val underPhotons = mean(photons, 24, 24, 16)
         val openBrute = mean(brute, 1, 1, 6)
         val openPhotons = mean(photons, 1, 1, 6)
-        assertTrue(underBrute > 0.05, "the floor under the slab is dark even by brute force: $underBrute")
+        val what = if (smoke) "smoke" else "floor"
+        println("[caustics test] $backend $what: under the slab photons $underPhotons, brute force $underBrute; open $openPhotons, $openBrute")
+        assertTrue(underBrute > 0.05, "the $what under the slab is dark even by brute force: $underBrute")
         assertTrue(
             abs(underPhotons / underBrute - 1.0) < 0.06,
-            "under the slab, photons give $underPhotons where brute force gives $underBrute ($backend)"
+            "under the slab, photons give $underPhotons where brute force gives $underBrute ($backend, $what)"
         )
         assertTrue(
             abs(openPhotons / openBrute - 1.0) < 0.05,
-            "on the open floor, photons give $openPhotons where brute force gives $openBrute ($backend)"
+            "in the open, photons give $openPhotons where brute force gives $openBrute ($backend, $what)"
         )
     }
 }

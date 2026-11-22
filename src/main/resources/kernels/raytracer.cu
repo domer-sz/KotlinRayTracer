@@ -272,6 +272,9 @@ typedef struct {
     float v;
     int material;
     bool frontFace;
+#if HAS_MEDIA
+    float density;                       // in fog, the volume's density: photons there are kept divided by it
+#endif
 #if RT_OPTIX && GUIDES_ON
     int turning;                         // the guides only: a placed mesh a turntable turns, which the flow follows
 #endif
@@ -774,6 +777,9 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
         rec->material = sc->mediumInts[best->index * 2 + 1];
         rec->u = 0.0f;
         rec->v = 0.0f;
+#if HAS_MEDIA
+        rec->density = -1.0f / sc->mediumFloats[best->index];
+#endif
         return;
     }
     // In front or behind is the surface's own business; the shading normal only shades.
@@ -1355,6 +1361,7 @@ __device__ inline float3 caustic_gather(const CausticParams* cp, float3 x, float
                     float3 d = make_float3(P[0] - x.x, P[1] - x.y, P[2] - x.z);
                     float d2 = dot(d, d);
                     if (d2 >= r2) continue;
+                    if (P[7] != 0.0f) continue;          // one kept in fog
                     if (fabsf(dot(d, n)) > slab) continue;
                     if (P[4] * n.x + P[5] * n.y + P[6] * n.z >= 0.0f) continue;
                     sum += make_float3(P[8], P[9], P[10]) * (1.0f - d2 / r2);
@@ -1362,6 +1369,50 @@ __device__ inline float3 caustic_gather(const CausticParams* cp, float3 x, float
             }
     return sum * (2.0f / (M_PI_F * r2));
 }
+
+#if HAS_MEDIA
+/**
+ * The fluence (the radiance summed over all directions) the photons bring to point x in fog: the
+ * photons kept in fog in a ball of the launch's radius, each already divided by the density of
+ * the fog it stopped in - a photon stops in a stretch ds with chance density * ds, so the flux
+ * kept in a volume V is density * fluence * V - weighed by 1 - d^2/r^2 over that kernel's
+ * integral in three dimensions, 8 pi r^3 / 15. Isotropic fog turns it into radiance with
+ * albedo / (4 pi). The beam of light a lens sends through smoke, which the camera's paths alone
+ * would almost never find: from a point in the beam, only the directions back along it through
+ * the lens lead to the lamp.
+ */
+__device__ inline float3 caustic_gather_volume(const CausticParams* cp, float3 x) {
+    float r = cp->radius;
+    float r2 = r * r;
+    float cs = cp->cellSize;
+    int mask = cp->tableSize - 1;
+    int x0 = (int)floorf((x.x - r) / cs), x1 = (int)floorf((x.x + r) / cs);
+    int y0 = (int)floorf((x.y - r) / cs), y1 = (int)floorf((x.y + r) / cs);
+    int z0 = (int)floorf((x.z - r) / cs), z1 = (int)floorf((x.z + r) / cs);
+    int seen[8];
+    int seenCount = 0;
+    float3 sum = make_float3(0.0f, 0.0f, 0.0f);
+    for (int cz = z0; cz <= z1; cz++)
+        for (int cy = y0; cy <= y1; cy++)
+            for (int cx = x0; cx <= x1; cx++) {
+                int h = caustic_cell(cx, cy, cz, mask);
+                bool again = false;
+                for (int k = 0; k < seenCount; k++) again = again || seen[k] == h;
+                if (again) continue;
+                if (seenCount < 8) seen[seenCount++] = h;
+                int end = cp->cellStart[h + 1];
+                for (int i = cp->cellStart[h]; i < end; i++) {
+                    const float* P = cp->sorted + i * PHOTON_FLOATS;
+                    if (P[7] == 0.0f) continue;          // one on a surface
+                    float3 d = make_float3(P[0] - x.x, P[1] - x.y, P[2] - x.z);
+                    float d2 = dot(d, d);
+                    if (d2 >= r2) continue;
+                    sum += make_float3(P[8], P[9], P[10]) * (1.0f - d2 / r2);
+                }
+            }
+    return sum * (15.0f / (8.0f * M_PI_F * r2 * r));
+}
+#endif
 #endif
 
 #if AOV_MODE == 5
@@ -1468,7 +1519,18 @@ __device__ void photon_shoot(const Scene* sc, int rootNode,
             casterHits++;
             continue;
         }
-        if (casterHits == 0 || hitKind != 0) return;
+        if (casterHits == 0) return;
+#if HAS_MEDIA
+        if (hitKind == 4) {
+            // Stopped in fog past a caster: kept there, divided by the fog's density (caustic_gather_volume).
+            flux = flux * (1.0f / rec.density);
+            slot[0] = rec.point.x; slot[1] = rec.point.y; slot[2] = rec.point.z; slot[3] = 1.0f;
+            slot[4] = d.x; slot[5] = d.y; slot[6] = d.z; slot[7] = 1.0f;
+            slot[8] = flux.x; slot[9] = flux.y; slot[10] = flux.z; slot[11] = 0.0f;
+            return;
+        }
+#endif
+        if (hitKind != 0) return;
         slot[0] = rec.point.x; slot[1] = rec.point.y; slot[2] = rec.point.z; slot[3] = 1.0f;
         slot[4] = d.x; slot[5] = d.y; slot[6] = d.z; slot[7] = 0.0f;
         slot[8] = flux.x; slot[9] = flux.y; slot[10] = flux.z; slot[11] = 0.0f;
@@ -1831,7 +1893,16 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                                                           matI[rec.material * 4 + 1], rec.u, rec.v, rec.point);
                             causticColor += throughput * albedo * (1.0f / M_PI_F) * caustic_gather(caustic, rec.point, rec.normal);
                             causticState = 1;
-                        } else {
+                        }
+#if HAS_MEDIA
+                        else if (kind == 4) {
+                            float3 albedo = texture_value(texI, texF, images, perlinVectors, perlinPermutations,
+                                                          matI[rec.material * 4 + 1], rec.u, rec.v, rec.point);
+                            causticColor += throughput * albedo * (1.0f / (4.0f * M_PI_F)) * caustic_gather_volume(caustic, rec.point);
+                            causticState = 1;
+                        }
+#endif
+                        else {
                             causticState = 3;
                         }
                     }
