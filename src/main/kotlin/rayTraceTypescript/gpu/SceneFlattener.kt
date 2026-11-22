@@ -6,6 +6,7 @@ import rayTraceTypescript.materials.Material
 import rayTraceTypescript.objects.BvhNode
 import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.objects.HittableList
+import rayTraceTypescript.objects.Lens
 import rayTraceTypescript.objects.ConstantMedium
 import rayTraceTypescript.objects.Quad
 import rayTraceTypescript.objects.RotateY
@@ -91,7 +92,8 @@ class SceneFlattener private constructor() {
             perlinVectors = materials.perlinVectors.toArray(),
             perlinPermutations = materials.perlinPermutations.toArray(),
             rootNode = root,
-            maxDepth = bvh.maxDepth
+            maxDepth = bvh.maxDepth,
+            optics = materials.optics.toArray()
         )
     }
 
@@ -125,6 +127,11 @@ class SceneFlattener private constructor() {
                 val (index, quad) = appendQuad(hittable, transform)
                 val box = quad.aabbBoundingBox()
                 refs.add(SceneBuffers.LEAF_QUAD, index, box.x.min, box.y.min, box.z.min, box.x.max, box.y.max, box.z.max)
+            }
+            is Lens -> {
+                val offset = materials.addLens(hittable, transform)
+                val box = hittable.placed(transform.point(hittable.vertex), transform.vector(hittable.axis)).aabbBoundingBox()
+                refs.add(SceneBuffers.LEAF_LENS, offset, box.x.min, box.y.min, box.z.min, box.x.max, box.y.max, box.z.max)
             }
             is PlacedMesh -> {
                 require(transform === Transform.IDENTITY) { "A placed mesh carries its own placement" }

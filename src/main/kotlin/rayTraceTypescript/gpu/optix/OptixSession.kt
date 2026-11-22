@@ -242,7 +242,8 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             keep(DeviceMemory.upload(s.textureInts)), keep(DeviceMemory.upload(s.textureFloats)),
             keep(DeviceMemory.upload(s.textureImages)),
             keep(DeviceMemory.upload(s.perlinVectors)), keep(DeviceMemory.upload(s.perlinPermutations)),
-            keep(DeviceMemory.upload(s.triangleNormals))
+            keep(DeviceMemory.upload(s.triangleNormals)),
+            keep(DeviceMemory.upload(s.optics))
         )
 
         // The loose surfaces: the scene's own triangles - as the kernel keeps them, first vertex
@@ -275,7 +276,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
 
         // The spheres a ray may hit - not the volumes' boundaries or the lights' stand-ins - by
         // their boxes, which take in a moving sphere's whole path: where it starts and where it ends.
-        val boxes = FloatArray(s.sceneSpheres.size * 6)
+        val boxes = FloatArray((s.sceneSpheres.size + s.sceneLenses.size) * 6)
         s.sceneSpheres.forEachIndexed { k, sphere ->
             val at = sphere * SceneBuffers.SPHERE_STRIDE
             // A negative radius turns a sphere inside out (the inner wall of a hollow glass ball);
@@ -288,7 +289,9 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
                 boxes[k * 6 + 3 + axis] = maxOf(start, end) + r
             }
         }
-        sphereIds = keep(DeviceMemory.upload(s.sceneSpheres))
+        // The lenses share the tree, after the spheres, known by -1 - their record's offset.
+        s.sceneLenses.forEachIndexed { j, offset -> SceneBuffers.lensBox(s.optics, offset).copyInto(boxes, (s.sceneSpheres.size + j) * 6) }
+        sphereIds = keep(DeviceMemory.upload(s.sceneSpheres + s.sceneLenses.map { -1 - it }.toIntArray()))
         spheres = if (boxes.isEmpty()) null else accel.customPrimitives(boxes)
 
         // What shading needs to know of each placed mesh (the kernel's Instance), and the
@@ -539,7 +542,7 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
         private fun definesFor(scene: InstancedScene): String =
             scene.kernelDefines().let { features ->
                 features + when {
-                    scene.sceneSpheres.isEmpty() -> ""
+                    scene.sceneSpheres.isEmpty() && scene.sceneLenses.isEmpty() -> ""
                     // Moving spheres need each ray's time in their intersection program.
                     features.contains("-DHAS_MOTION=1") -> " $SPHERES_DEFINE $RAY_TIME_DEFINE"
                     else -> " $SPHERES_DEFINE"
@@ -547,15 +550,15 @@ internal class OptixSession(initial: GpuScene, private val maxPixels: Int, devic
             }
 
         fun unsupported(scene: InstancedScene): String? = when {
-            scene.sceneTriangles == 0 && scene.sceneQuads.isEmpty() && scene.sceneSpheres.isEmpty() && scene.instances.isEmpty() ->
+            scene.sceneTriangles == 0 && scene.sceneQuads.isEmpty() && scene.sceneSpheres.isEmpty() && scene.sceneLenses.isEmpty() && scene.instances.isEmpty() ->
                 // Fog alone leaves OptiX no tree to build; the CUDA kernel takes such a scene.
                 "the scene has no surface for OptiX's tree"
             else -> null
         }
 
-        /** The kernel's Params: 32 pointers and 64-bit numbers, then 19 numbers of 32 bits, padded to a multiple of 8 as the compiler pads it. */
+        /** The kernel's Params: 33 pointers and 64-bit numbers, then 19 numbers of 32 bits, padded to a multiple of 8 as the compiler pads it. */
         private const val PARAMS_PADDING = 4
-        private const val PARAMS_BYTES = 32 * 8 + 19 * 4 + PARAMS_PADDING
+        private const val PARAMS_BYTES = 33 * 8 + 19 * 4 + PARAMS_PADDING
         /** The kernel's Instance: four pointers, then six numbers of 32 bits. */
         private const val INSTANCE_BYTES = 4 * 8 + 6 * 4
         /** What a hit hands back: kind, index, distance, the two surface coordinates and the instance (and with moving spheres, the ray's time, which it is handed). */

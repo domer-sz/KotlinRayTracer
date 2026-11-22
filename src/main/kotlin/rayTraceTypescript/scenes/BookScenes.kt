@@ -49,7 +49,11 @@ object BookScenes {
         "showcase" to { showcase() },
         "model" to { model() },
         "studio-model" to { studioModel() },
-        "file" to { fileScene() }
+        "file" to { fileScene() },
+        "optical-bench" to { OpticsScenes.bench() },
+        "prism" to { OpticsScenes.prism() },
+        "lens-gallery" to { OpticsScenes.gallery() },
+        "laser" to { OpticsScenes.laser() }
     )
 
     val names: List<String> get() = scenes.keys.toList()

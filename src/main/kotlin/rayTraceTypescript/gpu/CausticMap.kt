@@ -298,6 +298,8 @@ internal class CausticMap(private val cuda: CudaContext) : AutoCloseable {
                 if (crowd == null) boxes += b
             }
             if (crowd != null) boxes += crowd
+            // Each lens its own box: all glass, it always casts.
+            for (offset in scene.sceneLenses) boxes += SceneBuffers.lensBox(scene.optics, offset)
             val loose = box()
             for (t in 0 until scene.sceneTriangles) {
                 if (!mayCast(scene, scene.triangleMaterials[t])) continue

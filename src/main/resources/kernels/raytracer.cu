@@ -61,6 +61,7 @@ __device__ inline float3 xyz(float4 a) { return make_float3(a.x, a.y, a.z); }
 #define LEAF_QUAD     (-3)
 #define LEAF_MEDIUM   (-4)
 #define LEAF_MESH     (-5)                   // a triangle of a placed mesh, which only OptiX keeps as an instance
+#define LEAF_LENS     (-6)                   // a lens (objects/Lens): its record's offset in Scene.optics
 #define TRIANGLE_PARALLEL_EPSILON 1e-8f
 #define STACK_SIZE    64
 #define REJECTION_CAP 64
@@ -85,6 +86,14 @@ __device__ inline float3 xyz(float4 a) { return make_float3(a.x, a.y, a.z); }
 #endif
 #ifndef HAS_LIGHTS
 #define HAS_LIGHTS 1
+#endif
+#ifndef HAS_LENSES
+#define HAS_LENSES 1
+#endif
+// Glass from the catalog bends each wavelength by its own index: a path takes one wavelength at
+// the first such glass it meets (see scatter). Without any, every glass keeps its one index.
+#ifndef HAS_DISPERSION
+#define HAS_DISPERSION 1
 #endif
 #ifndef HAS_SMOOTH
 #define HAS_SMOOTH 1
@@ -272,6 +281,10 @@ typedef struct {
     float v;
     int material;
     bool frontFace;
+#if HAS_LENSES
+    int mediumFrom;                      // on a lens's surface the material the ray comes from and the one it goes
+    int mediumTo;                        // into, -1 for air; mediumFrom is -2 on every other surface
+#endif
 #if HAS_MEDIA
     float density;                       // in fog, the volume's density: photons there are kept divided by it
 #endif
@@ -300,6 +313,7 @@ typedef struct {
     const float* __restrict__ matF;            // for a normal map, found when the hit is finished
     const int* __restrict__ texI;
     const unsigned char* __restrict__ images;
+    const float* __restrict__ optics;          // lenses (48 floats each) and catalog glasses (8 each), by offset
 } Scene;
 
 // The closest hit found so far. Only what the search itself needs: normals, points and texture
@@ -358,6 +372,7 @@ struct Params {
     const float* perlinVectors;
     const int* perlinPermutations;
     const float* triangleNormals;        // the loose triangles' corner normals, as the CUDA kernel's argument
+    const float* optics;                 // lenses and catalog glasses, as the CUDA kernel's argument
     float* out;
     float* guideNormal;                  // with GUIDES, the normal guide the albedo guide's rays find
     float* guideFlow;                    // with GUIDES, how far each pixel's first hit moved since the frame before, in pixels
@@ -417,6 +432,139 @@ __device__ inline bool sphere_t(const Scene* sc, int index, float3 origin, float
         if (!(root > tMin && root < tMax)) return false;
     }
     *tOut = root;
+    return true;
+}
+
+// The real roots of a t^2 + 2 b t + c = 0 without cancellation; a = 0 leaves the linear one.
+__device__ inline int quadratic_roots(float a, float b, float c, float* r0, float* r1) {
+    if (fabsf(a) < 1e-12f) {
+        if (b == 0.0f) return 0;
+        *r0 = -c / (2.0f * b);
+        return 1;
+    }
+    float disc = b * b - a * c;
+    if (disc < 0.0f) return 0;
+    float q = -(b + copysignf(sqrtf(disc), b));
+    if (q == 0.0f) { *r0 = 0.0f; return 1; }
+    *r0 = q / a;
+    *r1 = c / q;
+    return 2;
+}
+
+#define LENS_TERMS 8                     // Zemax's EVENASPH: rho^2 to rho^16
+#define LENS_NEWTON 12
+
+// Lens.surfaceSag and its slope d sag / d(rho^2) at u = rho^2: the conic of curvature c and
+// constant k, plus the polynomial (record floats 21 + 9j on).
+__device__ inline float lens_sag(const float* L, int j, float u) {
+    float c = L[9 + 2 * j];
+    float z = c * u / (1.0f + sqrtf(fmaxf(0.0f, 1.0f - (1.0f + L[20 + 9 * j]) * c * c * u)));
+    float power = u;
+    for (int i = 0; i < LENS_TERMS; i++) { z += L[21 + 9 * j + i] * power; power *= u; }
+    return z;
+}
+__device__ inline float lens_slope(const float* L, int j, float u) {
+    float c = L[9 + 2 * j];
+    float slope = c / (2.0f * sqrtf(fmaxf(1e-12f, 1.0f - (1.0f + L[20 + 9 * j]) * c * c * u)));
+    float power = 1.0f;
+    for (int i = 0; i < LENS_TERMS; i++) { slope += (float)(i + 1) * L[21 + 9 * j + i] * power; power *= u; }
+    return slope;
+}
+
+// Lens.nearest: the surfaces of a lens - caps of conics c(rho^2 + (1 + k) s^2) - 2 s = 0 about
+// each vertex along the axis, a sphere when k = 0, with an even polynomial on top for an asphere,
+// found by Newton's method from the conic - inside the rim, and the cylinder of its rim between
+// the surfaces' rims. The record (SceneBuffers.LENS_STRIDE, 48): vertex (3), axis (3),
+// semi-diameter, surface count, the surfaces' vertex and curvature (2 x 3), their rims along the
+// axis (3), each element's material (2), which surfaces have a polynomial (bits), then each
+// surface's conic constant and 8 polynomial terms (9 x 3). *code says which surface: 0 until n,
+// then n + j for element j's rim.
+__device__ inline bool lens_t(const float* L, float3 origin, float3 direction, float tMin, float tMax,
+                              float* tOut, int* code) {
+    float3 vertex = make_float3(L[0], L[1], L[2]);
+    float3 axis = make_float3(L[3], L[4], L[5]);
+    float h = L[6];
+    int n = (int)L[7];
+    float dd = dot(direction, direction);
+    float ds = dot(direction, axis);
+    // A ray from far off - the sun, metres away - is first brought up to the ball round the lens
+    // (Lens.nearest): solved from there, the quadratics lose nothing to |q|^2 of millions, which
+    // left a hit microns short of the first surface for the ray to cross it twice.
+    float start = fminf(L[8], L[14]);
+    float end = fmaxf(L[8 + 2 * (n - 1)], L[14 + n - 1]);
+    float half = 0.5f * (end - start);
+    float reach = sqrtf(half * half + h * h) * 1.01f + 0.02f;
+    float shift = fmaxf(0.0f, dot(vertex + axis * (0.5f * (start + end)) - origin, direction) / dd - reach * rsqrtf(dd));
+    float3 o = origin + direction * shift - vertex;
+    tMin -= shift;
+    float best = tMax - shift;
+    int bestCode = -1;
+    int polynomials = (int)L[19];
+    for (int k = 0; k < n; k++) {
+        float z = L[8 + 2 * k];
+        float c = L[9 + 2 * k];
+        float conic = L[20 + 9 * k];
+        float3 q = o - axis * z;
+        float qs = dot(q, axis);
+        float r[3];
+        int count = quadratic_roots(c * (dd + conic * ds * ds), c * (dot(q, direction) + conic * qs * ds) - ds,
+                                    c * (dot(q, q) + conic * qs * qs) - 2.0f * qs, &r[0], &r[1]);
+        if (!(polynomials & (1 << k))) {
+            for (int i = 0; i < count; i++) {
+                float t = r[i];
+                if (!(t > tMin && t < best)) continue;
+                float s = qs + t * ds;
+                float3 p = q + direction * t;
+                // The sheet through the vertex (where 1 - c(1 + k)s is the root in the sag), inside the rim.
+                if (1.0f - c * (1.0f + conic) * s > 0.0f && dot(p, p) - s * s <= h * h) { best = t; bestCode = k; }
+            }
+            continue;
+        }
+        // An asphere: Newton on f(t) = s(t) - sag(rho(t)^2) from each of the conic's crossings and
+        // the vertex's plane, as Lens.nearest does.
+        if (ds != 0.0f) r[count++] = -qs / ds;
+        float3 qr = q - axis * qs;
+        float3 dr = direction - axis * ds;
+        for (int i = 0; i < count; i++) {
+            float t = r[i];
+            bool converged = false;
+            for (int step = 0; step < LENS_NEWTON; step++) {
+                float3 pr = qr + dr * t;
+                float u = dot(pr, pr);
+                float f = qs + t * ds - lens_sag(L, k, u);
+                float df = ds - lens_slope(L, k, u) * 2.0f * dot(pr, dr);
+                if (df == 0.0f) break;
+                float next = t - f / df;
+                if (fabsf(next - t) <= 1e-6f * (1.0f + fabsf(t))) { t = next; converged = true; break; }
+                t = next;
+            }
+            if (!converged || !(t > tMin && t < best)) continue;
+            float3 pr = qr + dr * t;
+            float u = dot(pr, pr);
+            if (u <= h * h && (1.0f + conic) * c * c * u < 1.0f && fabsf(qs + t * ds - lens_sag(L, k, u)) < 1e-4f * (1.0f + h)) {
+                best = t; bestCode = k;
+            }
+        }
+    }
+    float os = dot(o, axis);
+    float3 orad = o - axis * os;
+    float3 drad = direction - axis * ds;
+    float ca = dot(drad, drad);
+    if (ca > 0.0f) {
+        float r[2];
+        int count = quadratic_roots(ca, dot(orad, drad), dot(orad, orad) - h * h, &r[0], &r[1]);
+        for (int i = 0; i < count; i++) {
+            float t = r[i];
+            if (!(t > tMin && t < best)) continue;
+            float s = os + t * ds;
+            for (int j = 0; j < n - 1; j++) {
+                if (s >= L[14 + j] && s <= L[15 + j]) { best = t; bestCode = n + j; break; }
+            }
+        }
+    }
+    if (bestCode < 0) return false;
+    *tOut = best + shift;
+    *code = bestCode;
     return true;
 }
 
@@ -487,6 +635,11 @@ __device__ inline void leaf_plain(const Scene* sc, int code, float3 origin, floa
         if (HAS_TRIANGLES && ref.x == LEAF_TRIANGLE) hit = triangle_t(sc, ref.y, origin, direction, tMin, best->t, &t, &u, &v);
         else if (HAS_SPHERES && ref.x == LEAF_SPHERE) hit = sphere_t(sc, ref.y, origin, direction, time, tMin, best->t, &t);
         else if (HAS_QUADS && ref.x == LEAF_QUAD) hit = quad_t(sc, ref.y, origin, direction, tMin, best->t, &t, &u, &v);
+        else if (HAS_LENSES && ref.x == LEAF_LENS) {
+            int code;
+            hit = lens_t(sc->optics + ref.y, origin, direction, tMin, best->t, &t, &code);
+            u = (float)code;
+        }
         else hit = false;
         if (hit) {
             best->t = t; best->u = u; best->v = v; best->kind = ref.x; best->index = ref.y;
@@ -601,6 +754,11 @@ __device__ inline void leaf_world(const Scene* sc, int code, float3 origin, floa
         if (HAS_TRIANGLES && ref.x == LEAF_TRIANGLE) hit = triangle_t(sc, ref.y, origin, direction, tMin, best->t, &t, &u, &v);
         else if (HAS_SPHERES && ref.x == LEAF_SPHERE) hit = sphere_t(sc, ref.y, origin, direction, time, tMin, best->t, &t);
         else if (HAS_QUADS && ref.x == LEAF_QUAD) hit = quad_t(sc, ref.y, origin, direction, tMin, best->t, &t, &u, &v);
+        else if (HAS_LENSES && ref.x == LEAF_LENS) {
+            int code;
+            hit = lens_t(sc->optics + ref.y, origin, direction, tMin, best->t, &t, &code);
+            u = (float)code;
+        }
         else if (HAS_MEDIA) hit = medium_t(sc, ref.y, origin, direction, time, tMin, best->t, rng, &t);
         else hit = false;
         if (hit) {
@@ -704,6 +862,9 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
 #endif
     rec->t = best->t;
     rec->point = origin + best->t * direction;
+#if HAS_LENSES
+    rec->mediumFrom = -2;
+#endif
     rec->u = best->u;
     rec->v = best->v;
     float3 outwardNormal;
@@ -721,6 +882,38 @@ __device__ inline void finish_hit(const Scene* sc, const Closest* best, float3 o
         sphere_uv(outwardNormal, rec);
         rec->material = sc->sphereMaterials[best->index];
         shading = outwardNormal;
+#if HAS_LENSES
+    } else if (best->kind == LEAF_LENS) {
+        // Lens.normal: towards the medium before the surface along the axis, out of the glass on the rim.
+        const float* L = sc->optics + best->index;
+        float3 vertex = make_float3(L[0], L[1], L[2]);
+        float3 axis = make_float3(L[3], L[4], L[5]);
+        int n = (int)L[7];
+        int code = (int)best->u;
+        float3 o = rec->point - vertex;
+        int front, back;
+        if (code < n) {
+            // The gradient of sag(rho^2) - s: 2 sag'(rho^2) r - a, r the radial part (Lens.normal).
+            float3 q = o - axis * L[8 + 2 * code];
+            float3 radial = q - axis * dot(q, axis);
+            outwardNormal = radial * (2.0f * lens_slope(L, code, dot(radial, radial))) - axis;
+            front = code == 0 ? -1 : (int)L[17 + code - 1];
+            back = code == n - 1 ? -1 : (int)L[17 + code];
+        } else {
+            outwardNormal = o - axis * dot(o, axis);
+            front = -1;
+            back = (int)L[17 + code - n];
+        }
+        outwardNormal = outwardNormal / length(outwardNormal);
+        shading = outwardNormal;
+        bool entering = dot(direction, outwardNormal) < 0.0f;
+        rec->mediumFrom = entering ? front : back;
+        rec->mediumTo = entering ? back : front;
+        // What the surface is for everything but bending light (caustics, guides, the quick look): glass.
+        rec->material = back >= 0 ? back : front;
+        rec->u = 0.0f;
+        rec->v = 0.0f;
+#endif
     } else if (HAS_TRIANGLES && best->kind == LEAF_TRIANGLE) {
         const float4* t = sc->triangles + best->index * 3;
         outwardNormal = cross(xyz(t[1]), xyz(t[2]));
@@ -1067,6 +1260,55 @@ __device__ inline float scatter_pdf_value(const ScatterRec* srec, float3 directi
     return fmaxf(0.0f, cosine / M_PI_F);
 }
 
+// ---------------------------------------------------------------- dispersion
+
+// The visible band a dispersive path draws its wavelength from, in microns (optics/Spectrum).
+#define SPECTRUM_FROM 0.38f
+#define SPECTRUM_TO   0.73f
+
+// GlassCatalog.Glass.n: a catalog glass's index at [microns] from its eight floats - the formula
+// (0 Sellmeier, 1 Schott), six coefficients, the index at the d line.
+__device__ inline float glass_n(const float* g, float microns) {
+    float x2 = microns * microns;
+    float n2;
+    if (g[0] > 0.5f) {
+        float i2 = 1.0f / x2;
+        n2 = g[1] + g[2] * x2 + i2 * (g[3] + i2 * (g[4] + i2 * (g[5] + i2 * g[6])));
+    } else {
+        n2 = 1.0f + g[1] / (1.0f - g[4] / x2) + g[2] / (1.0f - g[5] / x2) + g[3] / (1.0f - g[6] / x2);
+    }
+    return sqrtf(n2);
+}
+
+// The refractive index of material [m] (-1: air) for a path of [microns] (0: none drawn yet): a
+// catalog glass's own at that wavelength, otherwise the one index it has.
+__device__ inline float medium_index(const int* matI, const float* matF, const float* optics, int m, float microns) {
+    if (m < 0) return 1.0f;
+#if HAS_DISPERSION
+    int glass = matI[m * 4 + 3];
+    if (glass >= 0 && microns > 0.0f) return glass_n(optics + glass, microns);
+#endif
+    return matF[m * 4 + 1];
+}
+
+// optics/Spectrum.weight: the colour one wavelength carries, so that a path drawing its wavelength
+// evenly over the band averages to white - the CIE 1931 observer (Wyman, Sloan and Shirley's
+// fit), in linear sRGB, negative lobes cut off, each channel divided by its mean over the band.
+__device__ inline float lobe(float l, float mu, float s1, float s2) {
+    float t = (l - mu) / (l < mu ? s1 : s2);
+    return expf(-0.5f * t * t);
+}
+__device__ inline float3 spectral_weight(float microns) {
+    float l = microns * 1000.0f;
+    float X = 1.056f * lobe(l, 599.8f, 37.9f, 31.0f) + 0.362f * lobe(l, 442.0f, 16.0f, 26.7f) - 0.065f * lobe(l, 501.1f, 20.4f, 26.2f);
+    float Y = 0.821f * lobe(l, 568.8f, 46.9f, 40.5f) + 0.286f * lobe(l, 530.9f, 16.3f, 31.1f);
+    float Z = 1.217f * lobe(l, 437.0f, 11.8f, 36.0f) + 0.681f * lobe(l, 459.0f, 26.0f, 13.8f);
+    float r = fmaxf(0.0f, 3.2406f * X - 1.5372f * Y - 0.4986f * Z);
+    float g = fmaxf(0.0f, -0.9689f * X + 1.8758f * Y + 0.0415f * Z);
+    float b = fmaxf(0.0f, 0.0557f * X - 0.2040f * Y + 1.0570f * Z);
+    return make_float3(r * (1.0f / 0.5033789f), g * (1.0f / 0.3296633f), b * (1.0f / 0.3122747f));
+}
+
 /** The surface's own scattering density for a direction it was handed. */
 __device__ inline float scattering_pdf(int materialType, float3 normal, float3 scattered) {
     if (materialType == 4) return 1.0f / (4.0f * M_PI_F);          // Isotropic
@@ -1079,7 +1321,7 @@ __device__ inline bool scatter(const int* matI, const float* matF,
                     const unsigned char* images,
                     const float* perlinVectors, const int* perlinPermutations,
                     const HitRecord* rec, float3 inDirection, Rng* rng,
-                    ScatterRec* srec) {
+                    ScatterRec* srec, const float* optics, float* wavelength) {
     int type = matI[rec->material * 4];
     int texture = matI[rec->material * 4 + 1];
 
@@ -1163,10 +1405,28 @@ __device__ inline bool scatter(const int* matI, const float* matF,
         return dot(srec->direction, rec->gnormal) > 0.0f;
     }
 
-    // Dielectric - the only material left, unless the scene has none.
+    // Dielectric - the only material left, unless the scene has none. The boundary between the
+    // medium the ray comes from and the one it goes into, -1 being air: a glass object's surface
+    // has air on its outside; a lens's surface has whatever lies either side of it (one glass and
+    // the next, in a cemented doublet).
     if (!MAT_DIELECTRIC) return false;
-    float ri = matF[rec->material * 4 + 1];
-    float refractionRatio = rec->frontFace ? (1.0f / ri) : ri;
+    int from = rec->frontFace ? -1 : rec->material;
+    int to = rec->frontFace ? rec->material : -1;
+#if HAS_LENSES
+    if (rec->mediumFrom != -2) { from = rec->mediumFrom; to = rec->mediumTo; }
+#endif
+    srec->attenuation = make_float3(1.0f, 1.0f, 1.0f);
+#if HAS_DISPERSION
+    // The first catalog glass a path meets fixes its wavelength: drawn evenly over the visible
+    // band, the path from here on carries only that colour's share of its light.
+    if (*wavelength == 0.0f && ((from >= 0 && matI[from * 4 + 3] >= 0) || (to >= 0 && matI[to * 4 + 3] >= 0))) {
+        *wavelength = SPECTRUM_FROM + (SPECTRUM_TO - SPECTRUM_FROM) * rng_float(rng);
+        srec->attenuation = spectral_weight(*wavelength);
+    }
+#endif
+    float nFrom = medium_index(matI, matF, optics, from, *wavelength);
+    float nTo = medium_index(matI, matF, optics, to, *wavelength);
+    float refractionRatio = nFrom / nTo;
     float cosTheta = fminf(dot(-unitDirection, rec->normal), 1.0f);
     float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
 
@@ -1174,14 +1434,15 @@ __device__ inline bool scatter(const int* matI, const float* matF,
     // Short-circuit: the random draw only happens when refraction is possible, as on the CPU.
     bool useReflect = cannotRefract || (reflectance(cosTheta, refractionRatio) > rng_float(rng));
 
-    srec->attenuation = make_float3(1.0f, 1.0f, 1.0f);
-    // Tinted glass (Beer-Lambert): a ray leaving it - a hit on the inside - has gone rec->t times
-    // its direction's length through it, and [tint distance] of that leaves the tint's colour.
-    float tintDistance = matF[rec->material * 4];
-    if (tintDistance > 0.0f && !rec->frontFace) {
-        float3 tint = texture_value(texI, texF, images, perlinVectors, perlinPermutations, texture, rec->u, rec->v, rec->point);
-        float k = rec->t * length(inDirection) / tintDistance;
-        srec->attenuation = make_float3(powf(tint.x, k), powf(tint.y, k), powf(tint.z, k));
+    // Tinted glass (Beer-Lambert): a ray leaving a glass has gone rec->t times its direction's
+    // length through it, and [tint distance] of that leaves the tint's colour.
+    if (from >= 0) {
+        float tintDistance = matF[from * 4];
+        if (tintDistance > 0.0f) {
+            float3 tint = texture_value(texI, texF, images, perlinVectors, perlinPermutations, matI[from * 4 + 1], rec->u, rec->v, rec->point);
+            float k = rec->t * length(inDirection) / tintDistance;
+            srec->attenuation *= make_float3(powf(tint.x, k), powf(tint.y, k), powf(tint.z, k));
+        }
     }
     srec->direction = useReflect
         ? unitDirection - rec->normal * (2.0f * dot(unitDirection, rec->normal))
@@ -1505,6 +1766,7 @@ __device__ void photon_shoot(const Scene* sc, int rootNode,
     float3 origin = p + n * (extent * 1e-5f + 1e-4f);
     float time = rng_float(&rng);
     int casterHits = 0;
+    float wavelength = 0.0f;                 // drawn at the first catalog glass, as a camera path's is
     for (int bounce = 0; bounce < maxDepth; bounce++) {
         HitRecord rec;
         if (!world_hit(sc, rootNode, origin, d, time, 0.001f, INFINITY, &rng, &rec)) return;
@@ -1512,7 +1774,7 @@ __device__ void photon_shoot(const Scene* sc, int rootNode,
         if (hitKind == 3) return;
         if (is_caster(matI, matF, texI, texF, images, perlinVectors, perlinPermutations, &rec)) {
             ScatterRec srec;
-            if (!scatter(matI, matF, texI, texF, images, perlinVectors, perlinPermutations, &rec, d, &rng, &srec)) return;
+            if (!scatter(matI, matF, texI, texF, images, perlinVectors, perlinPermutations, &rec, d, &rng, &srec, sc->optics, &wavelength)) return;
             flux *= srec.attenuation;
             origin = rec.point;
             d = srec.direction / length(srec.direction);
@@ -1582,15 +1844,39 @@ extern "C" __global__ void __intersection__sphere() {
     float time = 0.0f;
 #endif
     float t;
-    if (sphere_t(&sc, params.sphereIds[optixGetPrimitiveIndex()], optixGetWorldRayOrigin(), optixGetWorldRayDirection(),
+    int id = params.sphereIds[optixGetPrimitiveIndex()];
+#if HAS_LENSES
+    // The same tree holds the lenses, by their boxes, as -1 - their record's offset: lens_t says
+    // where the ray meets which surface, and hands the surface on as the hit's attribute.
+    if (id < 0) {
+        int code;
+        if (lens_t(params.optics + (-1 - id), optixGetWorldRayOrigin(), optixGetWorldRayDirection(),
+                   optixGetRayTmin(), optixGetRayTmax(), &t, &code)) {
+            optixReportIntersection(t, 0u, (unsigned int)code);
+        }
+        return;
+    }
+#endif
+    if (sphere_t(&sc, id, optixGetWorldRayOrigin(), optixGetWorldRayDirection(),
                  time, optixGetRayTmin(), optixGetRayTmax(), &t)) {
         optixReportIntersection(t, 0u);
     }
 }
 
 extern "C" __global__ void __closesthit__sphere() {
+    int id = params.sphereIds[optixGetPrimitiveIndex()];
+#if HAS_LENSES
+    if (id < 0) {
+        optixSetPayload_0((unsigned int)LEAF_LENS);
+        optixSetPayload_1((unsigned int)(-1 - id));
+        optixSetPayload_2(__float_as_uint(optixGetRayTmax()));
+        optixSetPayload_3(__float_as_uint((float)optixGetAttribute_0()));
+        optixSetPayload_4(0u);
+        return;
+    }
+#endif
     optixSetPayload_0((unsigned int)LEAF_SPHERE);
-    optixSetPayload_1((unsigned int)params.sphereIds[optixGetPrimitiveIndex()]);
+    optixSetPayload_1((unsigned int)id);
     optixSetPayload_2(__float_as_uint(optixGetRayTmax()));
     optixSetPayload_3(0u);
     optixSetPayload_4(0u);
@@ -1625,6 +1911,7 @@ extern "C" __global__ void __raygen__render() {
     const int* perlinPermutations = params.perlinPermutations;
     const float* triangleNormals = params.triangleNormals;
     const float* triangleUvs = nullptr;  // the loose triangles never carry texture coordinates under OptiX
+    const float* optics = params.optics;
     const float fireflyClamp = params.fireflyClamp;
     const float* env = params.env;
     const int envWidth = params.envWidth;
@@ -1673,6 +1960,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                      const int* __restrict__ perlinPermutations,
                      const float* __restrict__ triangleNormals,
                      const float* __restrict__ triangleUvs,
+                     const float* __restrict__ optics,
                      float* out,
                      float* guideNormal,
                      float* guideFlow,
@@ -1726,6 +2014,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     scene.matF = matF;
     scene.texI = texI;
     scene.images = images;
+    scene.optics = optics;
 
 #if AOV_MODE == 5
     photon_shoot(&scene, rootNode, matI, matF, texI, texF, images, perlinVectors, perlinPermutations,
@@ -1765,6 +2054,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     bool fresh = true;
     Rng rng;
     float3 origin, direction, throughput, sampleColor;
+    float wavelength = 0.0f;                 // in microns, once the path has met a catalog glass (scatter); 0 before
     float time;
     int depth;
 #if CAUSTICS
@@ -1798,6 +2088,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
             // within maxReflectionDepth bounces contributes nothing more, as on the CPU.
             throughput = make_float3(1.0f, 1.0f, 1.0f);
             sampleColor = make_float3(0.0f, 0.0f, 0.0f);
+            wavelength = 0.0f;
             depth = 0;
 #if CAUSTICS
             causticState = 0;
@@ -1918,7 +2209,7 @@ extern "C" __global__ void render(const float* __restrict__ cam,
                                                          perlinVectors, perlinPermutations, &rec);
             ScatterRec srec;
             if (!scatter(matI, matF, texI, texF, images, perlinVectors, perlinPermutations,
-                         &rec, direction, &rng, &srec)) {
+                         &rec, direction, &rng, &srec, scene.optics, &wavelength)) {
                 done = true;
             } else if (srec.skipPdf) {
                 throughput *= srec.attenuation;

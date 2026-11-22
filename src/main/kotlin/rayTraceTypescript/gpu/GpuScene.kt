@@ -5,6 +5,7 @@ import rayTraceTypescript.objects.BvhNode
 import rayTraceTypescript.objects.ConstantMedium
 import rayTraceTypescript.objects.Hittable
 import rayTraceTypescript.objects.HittableList
+import rayTraceTypescript.objects.Lens
 import rayTraceTypescript.objects.Quad
 import rayTraceTypescript.objects.RotateY
 import rayTraceTypescript.objects.Sphere
@@ -77,7 +78,11 @@ class InstancedScene internal constructor(
     val boundaryLeaves: IntArray,
     val boundaryRefs: IntArray,
     /** The corners' normals of the [triangles], as [SceneBuffers.triangleNormals]; empty when none is smooth. */
-    val triangleNormals: FloatArray
+    val triangleNormals: FloatArray,
+    /** Lens records and catalog glasses, as [SceneBuffers.optics]. */
+    val optics: FloatArray = FloatArray(0),
+    /** Each lens's record offset in [optics]; OptiX keeps them in the spheres' tree. */
+    val sceneLenses: IntArray = IntArray(0)
 ) {
     val mediumCount: Int get() = mediumFloats.size
     val lightCount: Int get() = lights.size / 2
@@ -93,7 +98,8 @@ class InstancedScene internal constructor(
             sphereData = spheres, lights = lightCount > 0, materialInts = materialInts, textureInts = textureInts,
             smooth = triangleNormals.isNotEmpty() || instances.any { it.block.mesh.smooth },
             // Only placed meshes carry texture coordinates; the loose triangles never do.
-            uvs = instances.any { it.block.mesh.uvs != null }, materialFloats = materialFloats
+            uvs = instances.any { it.block.mesh.uvs != null }, materialFloats = materialFloats,
+            lenses = sceneLenses.isNotEmpty()
         )
     }
 
@@ -117,6 +123,7 @@ class InstancedScene internal constructor(
         private val lights = IntBuffer()
         private val sceneQuads = IntBuffer()
         private val sceneSpheres = IntBuffer()
+        private val sceneLenses = IntBuffer()
         private val instances = ArrayList<MeshInstance>()
         private val volumes = ArrayList<Pair<ConstantMedium, Transform>>()
         private val boundaries = BvhBuilder()
@@ -124,7 +131,7 @@ class InstancedScene internal constructor(
         fun build(world: Hittable, lightSources: Hittable?): InstancedScene {
             surfaces(world, Transform.IDENTITY)
             val sceneTriangles = triangleMaterials.size
-            require(sceneTriangles + sceneQuads.size + sceneSpheres.size + instances.size + volumes.size > 0) { "Cannot render an empty world" }
+            require(sceneTriangles + sceneQuads.size + sceneSpheres.size + sceneLenses.size + instances.size + volumes.size > 0) { "Cannot render an empty world" }
             // Boundaries after every surface, so that the surfaces' triangles come first in their table.
             volumes.forEach { (medium, transform) -> volume(medium, transform) }
             lightSources?.let { lightsOf(it, Transform.IDENTITY) }
@@ -152,7 +159,9 @@ class InstancedScene internal constructor(
                 boundaryNodes = boundaries.nodes.toArray(),
                 boundaryLeaves = boundaries.leaves.toArray(),
                 boundaryRefs = boundaries.refs.toArray(),
-                triangleNormals = if (anySmooth) triangleNormals.toArray() else FloatArray(0)
+                triangleNormals = if (anySmooth) triangleNormals.toArray() else FloatArray(0),
+                optics = materials.optics.toArray(),
+                sceneLenses = sceneLenses.toArray()
             )
         }
 
@@ -162,6 +171,7 @@ class InstancedScene internal constructor(
                 is Sphere -> sceneSpheres.add(sphere(hittable, transform))
                 is Triangle -> triangle(hittable, transform)
                 is Quad -> sceneQuads.add(quad(hittable, transform).first)
+                is Lens -> sceneLenses.add(materials.addLens(hittable, transform))
                 is PlacedMesh -> {
                     require(transform === Transform.IDENTITY) { "A placed mesh carries its own placement" }
                     val block = hittable.block

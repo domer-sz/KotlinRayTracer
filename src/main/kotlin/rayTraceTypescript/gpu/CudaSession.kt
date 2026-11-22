@@ -216,7 +216,7 @@ internal class CudaSession(initial: GpuScene, private val maxPixels: Int, device
         copy(s.textureInts), copy(s.textureFloats),
         copy(s.textureImages),
         copy(s.perlinVectors), copy(s.perlinPermutations),
-        copy(s.triangleNormals), copy(s.triangleUvs)
+        copy(s.triangleNormals), copy(s.triangleUvs), copy(s.optics)
     )
 
     private fun allocate(bytes: Long): Long = MemoryStack.stackPush().use { stack ->

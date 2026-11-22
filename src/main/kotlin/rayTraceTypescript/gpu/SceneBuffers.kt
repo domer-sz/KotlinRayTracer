@@ -53,7 +53,13 @@ class SceneBuffers(
     val maxDepth: Int,
     val triangleNormals: FloatArray = FloatArray(0),
     /** 6 floats per facet, in the same order: the texture coordinates at its corners, NaN first for one without; empty when no facet has any. */
-    val triangleUvs: FloatArray = FloatArray(0)
+    val triangleUvs: FloatArray = FloatArray(0),
+    /**
+     * Lenses ([LENS_STRIDE] floats each, see [MaterialTable.addLens]) and catalog glasses
+     * ([GLASS_STRIDE] each), referred to by offset: a [LEAF_LENS] ref by its record's, a glass
+     * material by its glass's.
+     */
+    val optics: FloatArray = FloatArray(0)
 ) {
     val nodeCount: Int get() = nodes.size / NODE_INTS
     val sphereCount: Int get() = sphereMaterials.size
@@ -72,7 +78,7 @@ class SceneBuffers(
         return defines(
             LEAF_SPHERE in kinds, LEAF_TRIANGLE in kinds, LEAF_QUAD in kinds, LEAF_MEDIUM in kinds,
             spheres, lightCount > 0, materialInts, textureInts, smooth = triangleNormals.isNotEmpty(),
-            uvs = triangleUvs.isNotEmpty(), materialFloats = materialFloats
+            uvs = triangleUvs.isNotEmpty(), materialFloats = materialFloats, lenses = LEAF_LENS in kinds
         )
     }
 
@@ -86,7 +92,8 @@ class SceneBuffers(
             sphereData: FloatArray, lights: Boolean, materialInts: IntArray, textureInts: IntArray,
             smooth: Boolean,
             uvs: Boolean = false,
-            materialFloats: FloatArray = FloatArray(0)
+            materialFloats: FloatArray = FloatArray(0),
+            lenses: Boolean = false
         ): String {
             val materials = materialInts.filterIndexed { i, _ -> i % MATERIAL_INT_STRIDE == 0 }.toSet()
             // A surface that glows from a texture needs the emission code as much as a lamp does.
@@ -95,6 +102,10 @@ class SceneBuffers(
             val moving = (0 until sphereData.size / SPHERE_STRIDE).any { s ->
                 (3..5).any { sphereData[s * SPHERE_STRIDE + it] != 0.0f }
             }
+            // A glass of the catalog keeps its glass's offset in the slot a metal keeps its roughness in.
+            val dispersive = dispersionOn() && (0 until materialInts.size / MATERIAL_INT_STRIDE).any {
+                materialInts[it * MATERIAL_INT_STRIDE] == 2 && materialInts[it * MATERIAL_INT_STRIDE + 3] >= 0
+            }
             val features = linkedMapOf(
                 "HAS_SPHERES" to spheres,
                 "HAS_TRIANGLES" to triangles,
@@ -102,6 +113,8 @@ class SceneBuffers(
                 "HAS_MEDIA" to media,
                 "HAS_MOTION" to moving,
                 "HAS_LIGHTS" to lights,
+                "HAS_LENSES" to lenses,
+                "HAS_DISPERSION" to dispersive,
                 "HAS_SMOOTH" to smooth,
                 "HAS_UV" to uvs,
                 // Normal maps bend only textured triangles' normals.
@@ -117,6 +130,31 @@ class SceneBuffers(
             )
             return features.entries.joinToString(" ") { (name, on) -> "-D$name=${if (on) 1 else 0}" }
         }
+
+        /** -Drt.dispersion=off bends every wavelength alike, each glass by its index at the d line. */
+        fun dispersionOn(): Boolean = System.getProperty("rt.dispersion")?.lowercase() !in setOf("off", "false", "0")
+
+        /** The box (min x, y, z, max x, y, z) of the lens whose record starts at [at] in [optics]: the cylinder through its rims and vertices. */
+        fun lensBox(optics: FloatArray, at: Int): FloatArray {
+            val n = optics[at + 7].toInt()
+            val start = minOf(optics[at + 8], optics[at + 14])
+            val end = maxOf(optics[at + 8 + 2 * (n - 1)], optics[at + 14 + n - 1])
+            val h = optics[at + 6]
+            val box = FloatArray(6)
+            for (axis in 0 until 3) {
+                val a = optics[at + 3 + axis]
+                val e = h * kotlin.math.sqrt(maxOf(0f, 1f - a * a)) + 1e-4f
+                val p = optics[at + axis] + a * start
+                val q = optics[at + axis] + a * end
+                box[axis] = minOf(p, q) - e
+                box[3 + axis] = maxOf(p, q) + e
+            }
+            return box
+        }
+
+        /** Floats per lens record and per catalog glass in [optics]. */
+        const val LENS_STRIDE = 48
+        const val GLASS_STRIDE = 8
 
         /** Ints per inner BVH node, see [BvhBuilder]. */
         const val NODE_INTS = 16
@@ -137,6 +175,8 @@ class SceneBuffers(
         const val LEAF_TRIANGLE = -2
         const val LEAF_QUAD = -3
         const val LEAF_MEDIUM = -4
+        /** -5 is the kernel's placed-mesh triangle under OptiX. */
+        const val LEAF_LENS = -6
 
         /** Depth of the traversal stack reserved in the kernel. */
         const val MAX_TRAVERSAL_DEPTH = 64

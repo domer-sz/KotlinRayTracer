@@ -4,6 +4,7 @@ import rayTraceTypescript.Color
 import rayTraceTypescript.Ray
 import rayTraceTypescript.Vector
 import rayTraceTypescript.objects.Hit
+import rayTraceTypescript.optics.GlassCatalog
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sqrt
@@ -14,9 +15,22 @@ import rayTraceTypescript.utils.RandomSource
  * body, not on its surface: light that has gone [tintDistance] through it keeps [tint] of itself
  * (Beer-Lambert), so a thick wall is darker than a thin one, as amber glass is. The ray learns
  * how far it went inside when it leaves - a hit on the inside of the surface.
+ *
+ * A catalog [glass] makes it dispersive: on the GPU a path that meets it takes one wavelength and
+ * the glass bends it by its own n for that wavelength (AGENTS.md, *Lenses and Dispersion*); [ri] is
+ * then its index at the d line, which the CPU and anything else that does not split colours use.
  */
-class Dielectric(val ri: Float, val tint: Color? = null, val tintDistance: Float = 1.0f) : Material {
+class Dielectric(
+    val ri: Float,
+    val tint: Color? = null,
+    val tintDistance: Float = 1.0f,
+    val glass: GlassCatalog.Glass? = null
+) : Material {
     constructor(ri: Double) : this(ri.toFloat())
+
+    /** Glass from the catalog ([GlassCatalog.glass]), dispersive on the GPU. */
+    constructor(glass: GlassCatalog.Glass, tint: Color? = null, tintDistance: Float = 1.0f) :
+        this(glass.n(GlassCatalog.D_LINE), tint, tintDistance, glass)
 
     override fun scatter(rayIn: Ray, hit: Hit): ScatterRecord {
         val attenuation = if (tint != null && !hit.frontFace) transmitted(hit.t * rayIn.direction.length()) else Color(1.0f, 1.0f, 1.0f)
