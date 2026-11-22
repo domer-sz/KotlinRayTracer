@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.2.0 - 2026-11-22
+
+- Laser scene (`-Drt.scene=laser`): a diode module, a source 0.04 mm across at the focus of the
+  Thorlabs 354710-C collimator, sends a beam 6 mm across and 5.5 mrad wide through a smoky room.
+  `-Drt.laser.target=diamond|ball|prism|none` stands a round brilliant, a glass ball or a prism
+  in the beam, breaking it into a star of beams, focusing it into a cone or bending it onto the
+  wall; `-Drt.laser.nm`, `.fog`, `.clouds`, `.room`, `.power`, `.source` tune it (1600 px at
+  1024 spp with photons: 35 s).
+- Photons stop in fog: with `-Drt.caustics=on` a beam a lens sends through smoke is
+  photon-mapped (a ball gather in the volume) where camera paths alone would almost never find
+  it. Smoke under a glass slab comes out at 0.884 against 0.886 by brute force, in both engines.
+- Real lenses, traced exactly in both engines: spherical, conic and even-asphere surfaces with
+  the glasses between them, so cemented doublets bend light glass to glass. A catalog of 258
+  Thorlabs and Edmund lenses and 35 glasses, converted from DCC-Lab/RayTracing (MIT), every lens
+  focusing within 1% of its quoted back focal length; `.zmx` files from lens makers are read too.
+- Dispersion: catalog glass bends each wavelength by its own index, so prisms and singlets split
+  white light into colour (`-Drt.dispersion=off` turns it off). Prisms of any cross-section.
+- New scenes: `optical-bench` (sunlight through any catalog lens onto a screen, `-Drt.lens`),
+  `prism` (Newton's spectrum), `lens-gallery` (every kind side by side, with their caustics).
+- Fixed: light sampling towards a target narrower than a float's precision (a small lens
+  metres from the sun) collapsed onto one point; the cone is now drawn without cancellation.
+
 ## v2.1.0 - 2026-11-21
 
 - Viewer objects take a surface form: a loaded model, the ball and the block can each turn into a
