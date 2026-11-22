@@ -229,10 +229,16 @@ __device__ inline float3 random_cosine_direction(Rng* rng) {
 __device__ inline float3 random_to_sphere(Rng* rng, float radius, float distanceSquared) {
     float r1 = rng_float(rng);
     float r2 = rng_float(rng);
-    float z = 1.0f + r2 * (sqrtf(1.0f - radius * radius / distanceSquared) - 1.0f);
+    // 1 - z without cancellation: 1 - cos(theta max) as x / (1 + sqrt(1 - x)). Written as the book
+    // writes it, 1 + r2 (sqrt(1 - x) - 1), a cone narrower than a float's precision - a 1 mm lens
+    // 4 m from the sun the photons are aimed at, x = 8e-8 - collapsed to its axis: every photon
+    // went through the same point of the lens.
+    float x = radius * radius / distanceSquared;
+    float oneMinusZ = r2 * x / (1.0f + sqrtf(fmaxf(0.0f, 1.0f - x)));
+    float z = 1.0f - oneMinusZ;
 
     float phi = 2.0f * M_PI_F * r1;
-    float root = sqrtf(1.0f - z * z);
+    float root = sqrtf(fmaxf(0.0f, oneMinusZ * (2.0f - oneMinusZ)));
     return make_float3(cosf(phi) * root, sinf(phi) * root, z);
 }
 

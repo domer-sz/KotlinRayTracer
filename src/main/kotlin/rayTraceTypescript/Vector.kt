@@ -95,10 +95,14 @@ open class Vector(val x: Float, val y: Float, val z: Float) {
         fun randomToSphere(radius: Float, distanceSquared: Float): Vector {
             val r1 = randomFloat(0.0f, 1.0f)
             val r2 = randomFloat(0.0f, 1.0f)
-            val z = 1.0f + r2 * (kotlin.math.sqrt(1.0f - radius * radius / distanceSquared) - 1.0f)
+            // 1 - z without cancellation, as the kernel works it out: a cone narrower than a float's
+            // precision (a small target metres off) would otherwise collapse to its axis.
+            val x = radius * radius / distanceSquared
+            val oneMinusZ = r2 * x / (1.0f + kotlin.math.sqrt(maxOf(0.0f, 1.0f - x)))
+            val z = 1.0f - oneMinusZ
 
             val phi = 2.0f * rayTraceTypescript.utils.pi * r1
-            val root = kotlin.math.sqrt(1.0f - z * z)
+            val root = kotlin.math.sqrt(maxOf(0.0f, oneMinusZ * (2.0f - oneMinusZ)))
             return Vector(kotlin.math.cos(phi) * root, kotlin.math.sin(phi) * root, z)
         }
 
