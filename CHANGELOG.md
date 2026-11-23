@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.3.0 - 2026-11-23
+
+- Wave films (`-Drt.turntable.wave=amplitude,wavelength[,lift]`): instead of turning, the placed
+  meshes ripple like cloth in a breeze - two waves running across the floor, each going round a
+  whole number of times so the film loops. The mesh is only moved, its normals following the
+  wave's gradient rather than welded again each frame. `-Drt.turntable.wave.native=on` ripples the
+  model a sponge (`-Drt.infill=sponge`) was made from and builds the sponge again every frame, so
+  its holes are laid out anew instead of riding on the surface.
+
 ## v2.2.0 - 2026-11-22
 
 - Laser scene (`-Drt.scene=laser`): a diode module, a source 0.04 mm across at the focus of the
