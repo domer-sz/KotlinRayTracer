@@ -449,7 +449,10 @@ object BookScenes {
         val chosen = MeshFill.Settings.materialOverride() ?: material
         val filling = MeshFill.fill(mesh, chosen, settings)
         println(filling.summary)
-        filling.mesh?.let { return rayTraceTypescript.gpu.PlacedMesh(rayTraceTypescript.gpu.MeshBlock(it), 1f, 0f, Vector(0f, 0f, 0f), chosen) }
+        filling.mesh?.let {
+            val source = if (settings.style == MeshFill.Style.SPONGE) mesh else null
+            return rayTraceTypescript.gpu.PlacedMesh(rayTraceTypescript.gpu.MeshBlock(it), 1f, 0f, Vector(0f, 0f, 0f), chosen, source = source)
+        }
         // A tree over the spheres for the CPU's own hit tests (the viewer's picking); the GPU builds its own.
         return BvhNode(HittableList(filling.spheres!!.toMutableList<Hittable>()))
     }

@@ -30,7 +30,9 @@ class Mesh(
      * Texture coordinates at each facet's three corners (6 floats a triangle: u, v of each), when
      * the file gave them (an OBJ's `vt`); NaN in a triangle's first value marks one without.
      */
-    val uvs: FloatArray? = null
+    val uvs: FloatArray? = null,
+    /** Corner normals worked out elsewhere (9 floats a triangle), used as [smoothNormals] instead of welding. */
+    private val givenNormals: FloatArray? = null
 ) {
 
     init {
@@ -38,6 +40,7 @@ class Mesh(
         require(vertices.size % VERTEX_FLOATS == 0) { "Expected $VERTEX_FLOATS floats per triangle" }
         require(faceMaterials == null || faceMaterials.size == vertices.size / VERTEX_FLOATS) { "One material per triangle" }
         require(uvs == null || uvs.size == vertices.size / VERTEX_FLOATS * UV_FLOATS) { "Six texture coordinates per triangle" }
+        require(givenNormals == null || givenNormals.size == vertices.size) { "One normal per corner" }
     }
 
     val triangleCount: Int get() = vertices.size / VERTEX_FLOATS
@@ -58,7 +61,7 @@ class Mesh(
      * sum of its facets' unnormalised normals, so a bigger facet weighs more, made unit length.
      * The same as StlViewer does it, so the two renderers shade a model alike.
      */
-    val smoothNormals: FloatArray by lazy { weldedNormals(vertices) }
+    val smoothNormals: FloatArray by lazy { givenNormals ?: weldedNormals(vertices) }
 
     fun bounds(): Aabb {
         var minX = Float.POSITIVE_INFINITY; var minY = Float.POSITIVE_INFINITY; var minZ = Float.POSITIVE_INFINITY

@@ -128,7 +128,9 @@ class PlacedMesh(
      * Set while a turntable film turns it frame by frame: the denoiser's flow guide then follows
      * its surface (see [rayTraceTypescript.gpu.FrameTurn]). Nothing else reads it.
      */
-    val turning: Boolean = false
+    val turning: Boolean = false,
+    /** The model a conversion (-Drt.infill=sponge) was built from, for a film that builds it again each frame. */
+    val source: rayTraceTypescript.objects.Mesh? = null
 ) : Hittable {
     val cos: Float = kotlin.math.cos(Math.toRadians(degrees.toDouble())).toFloat()
     val sin: Float = kotlin.math.sin(Math.toRadians(degrees.toDouble())).toFloat()
