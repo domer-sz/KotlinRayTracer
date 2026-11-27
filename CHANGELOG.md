@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.4.0 - 2026-11-27
+
+- A dispersion scale for glass known only by its index at the d line and its Abbe number
+  (`GlassCatalog.model`, `diamond()`, `crown()`), as Blender 5.3's Principled BSDF has: the spread
+  of colours is scaled about an index that stays put - 0 none, 1 the real glass, more exaggerated.
+  studio-model's `-Drt.studio.material=diamond|glass` now split colours (diamond n_d 2.417, V_d 55.3;
+  `-Drt.studio.dispersion=<scale>`, 0 for the old look), the filling takes
+  `-Drt.infill.material=diamond` and `-Drt.infill.dispersion`, and
+  `-Drt.turntable.dispersion=from,to` takes the scale there and back over a film's turn.
+- Camera paths through dispersive glass take their wavelengths along a per-pixel Weyl sequence
+  instead of independent draws, so a pixel's samples cover the spectrum evenly: +0.3 dB on the
+  diamond at 128 spp (`-Drt.cuda.options=-DRANDOM_WAVELENGTH=1` draws them as before).
+
 ## v2.3.0 - 2026-11-23
 
 - Wave films (`-Drt.turntable.wave=amplitude,wavelength[,lift]`): instead of turning, the placed
