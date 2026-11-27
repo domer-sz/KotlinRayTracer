@@ -1419,8 +1419,10 @@ __device__ inline bool scatter(const int* matI, const float* matF,
 #if HAS_DISPERSION
     // The first catalog glass a path meets fixes its wavelength: drawn evenly over the visible
     // band, the path from here on carries only that colour's share of its light.
-    if (*wavelength == 0.0f && ((from >= 0 && matI[from * 4 + 3] >= 0) || (to >= 0 && matI[to * 4 + 3] >= 0))) {
-        *wavelength = SPECTRUM_FROM + (SPECTRUM_TO - SPECTRUM_FROM) * rng_float(rng);
+    if (*wavelength <= 0.0f && ((from >= 0 && matI[from * 4 + 3] >= 0) || (to >= 0 && matI[to * 4 + 3] >= 0))) {
+        // A camera path brings its place in the pixel's sequence (-1 - u); a photon draws its own.
+        float u = *wavelength < 0.0f ? fminf(-1.0f - *wavelength, 0.99999994f) : rng_float(rng);
+        *wavelength = SPECTRUM_FROM + (SPECTRUM_TO - SPECTRUM_FROM) * u;
         srec->attenuation = spectral_weight(*wavelength);
     }
 #endif
@@ -2055,6 +2057,16 @@ extern "C" __global__ void render(const float* __restrict__ cam,
     Rng rng;
     float3 origin, direction, throughput, sampleColor;
     float wavelength = 0.0f;                 // in microns, once the path has met a catalog glass (scatter); 0 before
+#if HAS_DISPERSION && !RANDOM_WAVELENGTH
+    // A pixel's samples take their wavelengths along a Weyl sequence from a shift of its own
+    // (u = shift + sample * 0.618..., mod 1): any run of N samples covers the band about evenly,
+    // where independent draws leave colours bunched - the coloured specks of a sparse caustic.
+    // Carried until the path meets dispersive glass as -1 - u (scatter); -DRANDOM_WAVELENGTH=1
+    // draws each one independently instead.
+    Rng shiftRng;
+    rng_init(&shiftRng, seed, (unsigned long long)(y * width + x), 0xFFFFFFFFULL);
+    unsigned int wavelengthShift = rng_next(&shiftRng);
+#endif
     float time;
     int depth;
 #if CAUSTICS
@@ -2089,6 +2101,9 @@ extern "C" __global__ void render(const float* __restrict__ cam,
             throughput = make_float3(1.0f, 1.0f, 1.0f);
             sampleColor = make_float3(0.0f, 0.0f, 0.0f);
             wavelength = 0.0f;
+#if HAS_DISPERSION && !RANDOM_WAVELENGTH
+            wavelength = -1.0f - (float)(wavelengthShift + (unsigned int)sample * 2654435769u) * 0x1.0p-32f;
+#endif
             depth = 0;
 #if CAUSTICS
             causticState = 0;
