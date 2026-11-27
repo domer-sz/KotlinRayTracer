@@ -626,11 +626,14 @@ object BookScenes {
         // -0.4 EV on the emitters (lamps and backdrop): everything else only reflects them.
         val exposure = Math.pow(2.0, -0.4).toFloat()
 
-        // -Drt.studio.material=glass|diamond makes the figure clear (index 1.5, or diamond's 2.42) instead of gold.
+        // -Drt.studio.material=glass|diamond makes the figure clear (crown glass of index 1.5, or
+        // diamond's 2.417) instead of gold, splitting colours as each does; -Drt.studio.dispersion
+        // scales that spread (0 none, 1 the real one, more exaggerated - Blender's dispersion scale).
+        val dispersion = System.getProperty("rt.studio.dispersion")?.toFloatOrNull()?.takeIf { it >= 0f } ?: 1f
         val gold: Material = when (val chosen = System.getProperty("rt.studio.material")?.trim()?.lowercase()) {
             null, "", "gold" -> Metal(Color(0.9f, 0.7f, 0.3f), 0.05f)
-            "glass" -> Dielectric(1.5f)
-            "diamond" -> Dielectric(2.42f)
+            "glass" -> Dielectric(rayTraceTypescript.optics.GlassCatalog.crown(dispersion))
+            "diamond" -> Dielectric(rayTraceTypescript.optics.GlassCatalog.diamond(dispersion))
             else -> throw IllegalArgumentException("-Drt.studio.material=$chosen: expected gold, glass or diamond")
         }
         val mesh = MeshLoader.load(path).zUpToYUp().rotatedY(turn).standingOnFloor(targetHeight = height)

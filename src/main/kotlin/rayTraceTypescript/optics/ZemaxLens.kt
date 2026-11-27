@@ -160,13 +160,8 @@ class ZemaxLens private constructor(
             return Dielectric(modelGlass(name, nd, if (vd > 0f) vd else 50f))
         }
 
-        /** Cauchy's n = A + B / lambda^2 through n_d with (n_F - n_C) = (n_d - 1) / V_d, as Schott's n^2 = A^2 + 2AB/x^2 + B^2/x^4. */
-        internal fun modelGlass(name: String, nd: Float, vd: Float): GlassCatalog.Glass {
-            val f = GlassCatalog.F_LINE.toDouble(); val c = GlassCatalog.C_LINE.toDouble(); val d = GlassCatalog.D_LINE.toDouble()
-            val b = (nd - 1.0) / vd / (1.0 / (f * f) - 1.0 / (c * c))
-            val a = nd - b / (d * d)
-            return GlassCatalog.Glass("$name (model n_d $nd, V_d $vd)", true, floatArrayOf((a * a).toFloat(), 0f, (2 * a * b).toFloat(), (b * b).toFloat(), 0f, 0f), vd)
-        }
+        /** Zemax's model glass from n_d and V_d ([GlassCatalog.model]). */
+        internal fun modelGlass(name: String, nd: Float, vd: Float): GlassCatalog.Glass = GlassCatalog.model(name, nd, vd)
     }
 
     override fun toString() = "$name (${elementGroups.size} element group(s), image ${"%.3f".format(imageAt)} mm from the first vertex)"

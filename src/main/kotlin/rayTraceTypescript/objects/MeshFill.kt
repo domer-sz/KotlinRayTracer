@@ -87,17 +87,26 @@ object MeshFill {
 
             /**
              * The filling's own material instead of the model's: -Drt.infill.material=glass makes it
-             * glass (index -Drt.infill.ior, 1.5), tinted through its body by -Drt.infill.color if given;
-             * otherwise -Drt.infill.color=r,g,b makes it matte in that colour.
+             * glass (index -Drt.infill.ior, 1.5, spreading colours by Abbe number -Drt.infill.abbe,
+             * 64.2) and =diamond diamond (2.417, V_d 55.3), each tinted through its body by
+             * -Drt.infill.color if given and its spread of colours scaled by -Drt.infill.dispersion
+             * (1; 0 none); otherwise -Drt.infill.color=r,g,b makes it matte in that colour.
              */
             fun materialOverride(): Material? {
                 val colour = System.getProperty("rt.infill.color")
                     ?.split(',')?.mapNotNull { it.trim().toFloatOrNull() }?.takeIf { it.size == 3 }
                     ?.let { Color(it[0], it[1], it[2]) }
+                val dispersion = System.getProperty("rt.infill.dispersion")?.toFloatOrNull()?.takeIf { it >= 0f } ?: 1f
                 return when (val kind = System.getProperty("rt.infill.material")?.trim()?.lowercase()) {
                     null, "", "matte" -> colour?.let { Lambertian(it) }
-                    "glass", "szklo" -> Dielectric(System.getProperty("rt.infill.ior")?.toFloatOrNull() ?: 1.5f, colour)
-                    else -> throw IllegalArgumentException("-Drt.infill.material=$kind: expected glass or matte")
+                    "glass", "szklo" -> Dielectric(
+                        rayTraceTypescript.optics.GlassCatalog.model(
+                            "glass", System.getProperty("rt.infill.ior")?.toFloatOrNull() ?: 1.5f,
+                            System.getProperty("rt.infill.abbe")?.toFloatOrNull() ?: 64.17f, dispersion
+                        ), colour
+                    )
+                    "diamond", "diament" -> Dielectric(rayTraceTypescript.optics.GlassCatalog.diamond(dispersion), colour)
+                    else -> throw IllegalArgumentException("-Drt.infill.material=$kind: expected glass, diamond or matte")
                 }
             }
 

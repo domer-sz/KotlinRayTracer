@@ -71,20 +71,41 @@ object TurntableRender {
             return sponge
         }
 
+        // -Drt.turntable.dispersion=from,to: the turning glass spreads colours by a scale that goes
+        // there and back over the turn (Blender 5.3's dispersion scale, animated).
+        if (settings.dispersion != null) {
+            for (part in turning) {
+                val placed = part.hittable as? PlacedMesh
+                    ?: throw IllegalArgumentException("-Drt.turntable.dispersion needs placed meshes; ${part.name} is not one")
+                val glass = (placed.material as? rayTraceTypescript.materials.Dielectric)?.glass
+                require(placed.palette == null && glass?.modelName != null) {
+                    "-Drt.turntable.dispersion needs ${part.name} of a model glass (e.g. -Drt.studio.material=diamond), not ${placed.material}"
+                }
+            }
+            println("Dispersion: x${settings.dispersion.first} to x${settings.dispersion.second}" + if (settings.swing) "" else " and back")
+        }
+        /** [placed] in the turning glass of [frame]'s dispersion scale, or as it is without one. */
+        fun inGlassOf(placed: Hittable, frame: Int): Hittable {
+            val scale = settings.dispersionScale(frame) ?: return placed
+            val p = placed as PlacedMesh
+            val glass = (p.material as rayTraceTypescript.materials.Dielectric).withDispersion(scale)
+            return PlacedMesh(p.block, p.scale, p.degrees, p.offset, glass, p.palette, p.turning, p.source)
+        }
+
         fun buffersAt(frame: Int): GpuScene {
             val degrees = settings.degrees(frame)
             val swaps = java.util.IdentityHashMap<Hittable, Hittable>()
             if (wave != null) {
                 for (part in turning) {
                     val placed = part.hittable as PlacedMesh
-                    swaps[part.hittable] = PlacedMesh(
+                    swaps[part.hittable] = inGlassOf(PlacedMesh(
                         MeshBlock(rippled(placed, frame)), 1f, 0f, placed.offset, placed.material, placed.palette
-                    )
+                    ), frame)
                 }
                 return SceneFlattener.scene(swapped(scene.world, swaps), camera.lights?.let { swapped(it, swaps) })
             }
             for (part in turning) {
-                swaps[part.hittable] = Placement.turned(part.hittable, axisX, axisZ, degrees, turning = true)
+                swaps[part.hittable] = inGlassOf(Placement.turned(part.hittable, axisX, axisZ, degrees, turning = true), frame)
                 part.lightProxy?.let { swaps[it] = Placement.turned(it, axisX, axisZ, degrees) }
             }
             return SceneFlattener.scene(swapped(scene.world, swaps), camera.lights?.let { swapped(it, swaps) })

@@ -32,6 +32,12 @@ class Dielectric(
     constructor(glass: GlassCatalog.Glass, tint: Color? = null, tintDistance: Float = 1.0f) :
         this(glass.n(GlassCatalog.D_LINE), tint, tintDistance, glass)
 
+    /** The same glass with its spread of colours scaled by [scale] (a model glass only: [GlassCatalog.Glass.withDispersion]). */
+    fun withDispersion(scale: Float): Dielectric {
+        val own = requireNotNull(glass) { "glass of index $ri has no dispersion to scale" }
+        return Dielectric(own.withDispersion(scale), tint, tintDistance)
+    }
+
     override fun scatter(rayIn: Ray, hit: Hit): ScatterRecord {
         val attenuation = if (tint != null && !hit.frontFace) transmitted(hit.t * rayIn.direction.length()) else Color(1.0f, 1.0f, 1.0f)
         val refractionRatio = if (hit.frontFace) 1.0f / ri else ri

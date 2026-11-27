@@ -63,6 +63,21 @@ class LensRenderTest {
     }
 
     @Test
+    fun `a model glass spreads colours by its dispersion scale`() {
+        assumeGpu()
+        // N-SF11 as a model glass of its n_d and V_d (Blender-style): scale 0 splits nothing, 1 about as
+        // the catalog glass does, 2 about twice as far.
+        fun spread(scale: Float) = prism(dispersion = true, glass = Dielectric(GlassCatalog.model("flint", 1.78472f, 25.68f, scale))).let { it.blueY - it.redY }
+        val catalog = prism(dispersion = true).let { it.blueY - it.redY }
+        val none = spread(0f)
+        val real = spread(1f)
+        val doubled = spread(2f)
+        assertTrue(abs(none) < 0.5, "scale 0: blue and red $none pixels apart")
+        assertEquals(catalog, real, catalog * 0.2, "scale 1 against the catalog glass")
+        assertEquals(2.0 * real, doubled, real * 0.4, "scale 2 against scale 1")
+    }
+
+    @Test
     fun `the cuda kernel's asphere brings sunlight to a point`() = asphere("cuda")
 
     @Test
@@ -188,8 +203,7 @@ class LensRenderTest {
     private class Split(val blueY: Double, val redY: Double)
 
     /** A narrow beam through a flint prism onto a screen, seen square on: where blue and red land. */
-    private fun prism(dispersion: Boolean): Split {
-        val glass = Dielectric(GlassCatalog.glass("N-SF11"))
+    private fun prism(dispersion: Boolean, glass: Dielectric = Dielectric(GlassCatalog.glass("N-SF11"))): Split {
         // A prism with its apex up and a beam rising at 33.2 degrees onto its left face - minimum
         // deviation for n = 1.785 - through a slit; it leaves falling at about as much, blue the most.
         val rise = Math.toRadians(33.2)

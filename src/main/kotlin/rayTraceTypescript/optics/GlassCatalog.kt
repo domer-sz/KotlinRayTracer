@@ -17,7 +17,15 @@ object GlassCatalog {
     const val F_LINE = 0.4861f
     const val C_LINE = 0.6563f
 
-    class Glass(val name: String, val schott: Boolean, val k: FloatArray, val catalogAbbe: Float?) {
+    /**
+     * A glass: its formula ([schott] or Sellmeier) and six coefficients. A model glass
+     * ([GlassCatalog.model]) also keeps the [modelIndex] and [modelAbbe] it was made from, so its
+     * spread of colours can be scaled again ([withDispersion]).
+     */
+    class Glass(
+        val name: String, val schott: Boolean, val k: FloatArray, val catalogAbbe: Float?,
+        val modelName: String? = null, val modelIndex: Float = 0f, val modelAbbe: Float = 0f
+    ) {
         init {
             require(k.size == 6) { "a glass needs six coefficients" }
         }
@@ -39,6 +47,12 @@ object GlassCatalog {
         /** Eight floats for the kernel: the formula (0 Sellmeier, 1 Schott), the six coefficients, n at the d line. */
         fun packed(): FloatArray = floatArrayOf(if (schott) 1f else 0f, k[0], k[1], k[2], k[3], k[4], k[5], n(D_LINE))
 
+        /** The same model glass with its spread of colours scaled by [scale] instead (0 none, 1 its own). */
+        fun withDispersion(scale: Float): Glass {
+            val base = requireNotNull(modelName) { "only a model glass (n_d and V_d) can have its dispersion scaled, not $name" }
+            return model(base, modelIndex, modelAbbe, scale)
+        }
+
         override fun toString() = name
     }
 
@@ -57,6 +71,28 @@ object GlassCatalog {
     /** The glass called [name], however it is written: "N-BK7", "n_bk7" and "NBK7" are the same. */
     fun glass(name: String): Glass = all[key(name)]
         ?: throw IllegalArgumentException("unknown glass $name; known: ${all.values.joinToString { it.name }}")
+
+    /**
+     * A glass known only by its index at the d line [nd] and its Abbe number [abbe] - Zemax's model
+     * glass, or a gem such as diamond - written as Cauchy's n = A + B / lambda^2 through n_d with
+     * (n_F - n_C) = [scale] (n_d - 1) / V_d, in Schott's form n^2 = A^2 + 2AB/x^2 + B^2/x^4.
+     * [scale] spreads the colours as Blender's dispersion scale does, about a d-line index that
+     * stays put: 0 bends every wavelength alike, 1 is the glass itself, more exaggerates it.
+     */
+    fun model(name: String, nd: Float, abbe: Float, scale: Float = 1f): Glass {
+        require(nd > 1f && abbe > 0f && scale >= 0f) { "a model glass needs n_d > 1, V_d > 0 and a scale of 0 or more, not $nd, $abbe, $scale" }
+        val f = F_LINE.toDouble(); val c = C_LINE.toDouble(); val d = D_LINE.toDouble()
+        val b = (nd - 1.0) * scale / abbe / (1.0 / (f * f) - 1.0 / (c * c))
+        val a = nd - b / (d * d)
+        val label = if (scale == 1f) "$name (model n_d $nd, V_d $abbe)" else "$name (model n_d $nd, V_d $abbe, dispersion x$scale)"
+        return Glass(label, true, floatArrayOf((a * a).toFloat(), 0f, (2 * a * b).toFloat(), (b * b).toFloat(), 0f, 0f), if (scale > 0f) abbe / scale else null, name, nd, abbe)
+    }
+
+    /** Diamond, n_d 2.417 and V_d 55.3 (n_F - n_C 0.025; the "fire" of 0.044 jewellers quote is n_G - n_B). */
+    fun diamond(scale: Float = 1f): Glass = model("diamond", 2.417f, 55.3f, scale)
+
+    /** Plain crown glass, the studio's index of 1.5 with N-BK7's spread of colours (V_d 64.2). */
+    fun crown(scale: Float = 1f): Glass = model("crown", 1.5f, 64.17f, scale)
 
     private fun key(name: String) = name.uppercase().replace("-", "").replace("_", "").replace(" ", "")
 }

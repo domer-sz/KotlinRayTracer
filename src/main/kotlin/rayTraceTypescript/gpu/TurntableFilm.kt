@@ -30,8 +30,21 @@ data class TurntableSettings(
      * frame at [sweep] itself - the outward half of a swing there and back, whose return is these
      * frames played backwards (ffmpeg's reverse filter), so only half of it is traced.
      */
-    val swing: Boolean = false
+    val swing: Boolean = false,
+    /**
+     * The turning glass's dispersion scale from the first number to the second and back over a
+     * turn (half a cosine each way, so the film loops); in a swing from the first to the second,
+     * whose reversed return brings it back. Null leaves the material as it is.
+     */
+    val dispersion: Pair<Float, Float>? = null
 ) {
+    /** The dispersion scale at [frame] ([dispersion]); null without one. */
+    fun dispersionScale(frame: Int): Float? {
+        val (from, to) = dispersion ?: return null
+        val t = if (swing) frame.toDouble() / (framesPerTurn - 1) else 2.0 * frame / framesPerTurn
+        return (from + (to - from) * (1.0 - kotlin.math.cos(Math.PI * t)) / 2.0).toFloat()
+    }
+
     /** Frames of one turn; the turns after the first are copies of it. */
     val framesPerTurn: Int get() = maxOf(2, Math.round(seconds * fps).toInt())
 
@@ -46,7 +59,7 @@ data class TurntableSettings(
     }
 
     companion object {
-        /** Settings from -Drt.turntable.seconds / .turns / .fps / .reverse / .quality / .degrees / .swing and -Drt.samples. */
+        /** Settings from -Drt.turntable.seconds / .turns / .fps / .reverse / .quality / .degrees / .swing / .dispersion and -Drt.samples. */
         fun fromProperties(defaultSamples: Int): TurntableSettings {
             fun prop(name: String) = System.getProperty("rt.turntable.$name")
             return TurntableSettings(
@@ -57,7 +70,12 @@ data class TurntableSettings(
                 reverse = prop("reverse")?.let { it != "false" && it != "off" } ?: false,
                 compact = prop("quality") != "max",
                 sweep = prop("degrees")?.toDoubleOrNull()?.takeIf { it > 0.0 }?.coerceAtMost(360.0) ?: 360.0,
-                swing = prop("swing")?.let { it != "false" && it != "off" } ?: false
+                swing = prop("swing")?.let { it != "false" && it != "off" } ?: false,
+                dispersion = prop("dispersion")?.let { setting ->
+                    val n = setting.split(',').mapNotNull { it.trim().toFloatOrNull() }
+                    require(n.size == 2 && n.all { it >= 0f }) { "-Drt.turntable.dispersion=$setting: expected from,to (scales of 0 or more)" }
+                    n[0] to n[1]
+                }
             )
         }
     }
